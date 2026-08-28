@@ -1,0 +1,20 @@
+# Data Manipulation & HTML Parser
+pandas>=2.0.0
+numpy>=1.24.0
+lxml>=4.9.0
+html5lib>=1.1
+openpyxl>=3.1.0
+
+# Machine Learning & Clustering Algorithm
+kmodes>=0.12.0
+scikit-learn>=1.2.0
+
+# Jupyter Kernel
+ipykernel>=6.20.0
+jupyterlab>=4.0.0
+
+# Visualisasi & Interactive Dashboard
+matplotlib>=3.7.0
+seaborn>=0.12.0
+streamlit>=1.25.0
+plotly>=5.15.0
