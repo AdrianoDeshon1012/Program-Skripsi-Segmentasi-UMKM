@@ -3,6 +3,16 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import os
+import copy
+import json
+
+# Folium (Leaflet) untuk peta choropleth -- opsional, aplikasi tetap jalan tanpanya
+try:
+    import folium
+    from streamlit_folium import st_folium
+    FOLIUM_TERSEDIA = True
+except ImportError:
+    FOLIUM_TERSEDIA = False
 
 # ==========================================
 # 1. KONFIGURASI HALAMAN
@@ -16,17 +26,29 @@ st.set_page_config(
 
 FEATURES = ['sektor_makro', 'kelompok_tahun_berdiri']
 
-# k final hasil evaluasi kurva Elbow (lihat notebooks/02_kmodes_partitioning.ipynb bagian 4),
-# dan palet warna klaster -- dipakai konsisten di kartu profil, pie chart, dan heatmap.
-K_FINAL = 3
-CLUSTER_COLORS = ["#EF4444", "#3B82F6", "#10B981"]
-CLUSTER_BG = ["#FEF2F2", "#EFF6FF", "#ECFDF5"]
+# Palet warna klaster (6 warna, cukup untuk k maksimum kandidat Elbow k=2..6) -- warna mengikuti
+# id klaster dan dipakai konsisten di kartu profil, pie chart, dan heatmap. k per wilayah dibaca dari
+# 02c_k_optimal.csv (lihat notebooks/02_kmodes_partitioning.ipynb bagian 4), bukan konstanta.
+CLUSTER_COLORS = ["#EF4444", "#3B82F6", "#10B981", "#F59E0B", "#8B5CF6", "#EC4899"]
+CLUSTER_BG = ["#FEF2F2", "#EFF6FF", "#ECFDF5", "#FFFBEB", "#F5F3FF", "#FDF2F8"]
+
+# Kode wilayah BPS (properti 'CC_2' di GeoJSON) -> nilai kolom 'wilayah' di dataset
+KODE_WILAYAH = {
+    '3171': 'KOTA ADM. JAKARTA SELATAN',
+    '3172': 'KOTA ADM. JAKARTA TIMUR',
+    '3173': 'KOTA ADM. JAKARTA PUSAT',
+    '3174': 'KOTA ADM. JAKARTA BARAT',
+    '3175': 'KOTA ADM. JAKARTA UTARA',
+    '3101': 'KAB. ADM. KEP. SERIBU',
+}
+GEOJSON_FILENAME = "dki_wilayah.geojson"
+WILAYAH_KEP_SERIBU = 'KAB. ADM. KEP. SERIBU'
 
 # Ambang ukuran sampel minimum supaya klaster/sektor kecil tidak ikut dilabeli (dipakai label_ocean())
 MIN_N = 30
 MIN_PCT = 1.0
 
-# Ambang klasifikasi Red/Neutral/Blue Ocean, murni dari Location Quotient (LQ) --
+# Ambang Red/Neutral/Blue Ocean, murni dari Location Quotient (LQ) --
 # 0.8/1.25 mengikuti konvensi standar literatur ekonomi regional (Location Quotient), bukan angka buatan sendiri.
 LQ_BATAS_BLUE = 0.8
 LQ_BATAS_RED = 1.25
@@ -71,7 +93,7 @@ def _find_path(filename):
 
 @st.cache_data(show_spinner=False)
 def load_kmodes_data():
-    """Memuat dataset terklasterisasi (k=3, 2 fitur) dari direktori data."""
+    """Memuat dataset terklasterisasi (k optimal per wilayah, 2 fitur) dari direktori data."""
     path = _find_path("02_umkm_kmodes_clustered.csv")
     if path is None:
         return None
@@ -88,8 +110,55 @@ def load_elbow_data():
     return pd.read_csv(path)
 
 @st.cache_data(show_spinner=False)
+def load_k_optimal():
+    """Memuat tabel k optimal per wilayah (aturan titik terjauh dari garis lurus pada kurva
+    Elbow: k_optimal, kekuatan_siku, k_pembanding, selisih_d, catatan), dari
+    notebooks/02_kmodes_partitioning.ipynb."""
+    path = _find_path("02c_k_optimal.csv")
+    if path is None:
+        return None
+    return pd.read_csv(path)
+
+@st.cache_data(show_spinner=False)
+def load_geojson():
+    """Memuat batas 6 wilayah administrasi DKI Jakarta (data/geo/dki_wilayah.geojson) dan
+    mencocokkan tiap fitur ke kolom 'wilayah' lewat properti 'CC_2' (kode wilayah BPS).
+    Mengembalikan (geojson, pesan_error); pesan_error None jika semua wilayah cocok."""
+    possible_paths = [
+        os.path.join("data", "geo", GEOJSON_FILENAME),
+        os.path.join("..", "data", "geo", GEOJSON_FILENAME),
+    ]
+    path = next((p for p in possible_paths if os.path.exists(p)), None)
+    if path is None:
+        return None, f"Berkas `data/geo/{GEOJSON_FILENAME}` tidak ditemukan."
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            geojson = json.load(f)
+    except (OSError, ValueError) as e:
+        return None, f"Berkas `{path}` gagal dibaca sebagai GeoJSON ({e})."
+
+    features = geojson.get("features", [])
+    tanpa_kode = [i for i, ft in enumerate(features) if "CC_2" not in ft.get("properties", {})]
+    if tanpa_kode:
+        return None, f"Properti `CC_2` (kode wilayah BPS) tidak ditemukan pada {len(tanpa_kode)} fitur GeoJSON."
+
+    kode_asing = sorted({str(ft["properties"]["CC_2"]) for ft in features} - set(KODE_WILAYAH))
+    if kode_asing:
+        return None, f"Kode `CC_2` tidak dikenali: {', '.join(kode_asing)} (yang diharapkan: {', '.join(KODE_WILAYAH)})."
+
+    for ft in features:
+        ft["properties"]["wilayah"] = KODE_WILAYAH[str(ft["properties"]["CC_2"])]
+
+    hilang = sorted(set(KODE_WILAYAH.values()) - {ft["properties"]["wilayah"] for ft in features})
+    if hilang:
+        return None, f"Wilayah berikut tidak ada di GeoJSON: {', '.join(hilang)}."
+
+    return geojson, None
+
+@st.cache_data(show_spinner=False)
 def load_evaluation_summary():
-    """Memuat tabel profil klaster final (k=3) per wilayah -- kategori dominan
+    """Memuat tabel profil klaster final (k optimal per wilayah) -- kategori dominan
     deskriptif, Location Quotient (LQ), dan label Red/Neutral/Blue Ocean per
     klaster -- dari notebooks/03_interpretasi_dan_klasifikasi_ocean.ipynb."""
     path = _find_path("03_kmodes_evaluation_summary.csv")
@@ -98,7 +167,7 @@ def load_evaluation_summary():
     return pd.read_csv(path)
 
 # ==========================================
-# 3. KLASIFIKASI RED/NEUTRAL/BLUE OCEAN (murni Location Quotient)
+# 3. RED/NEUTRAL/BLUE OCEAN (murni Location Quotient)
 # ==========================================
 # Murni berbasis frekuensi/rasio -- tidak memakai ukuran jarak maupun komponen
 # pertumbuhan usaha apa pun. Ambang 0.8/1.25 mengikuti konvensi Location Quotient
@@ -206,7 +275,7 @@ def generate_cluster_profiles(df_region, profile_region):
 
     profile_region = profile_region.sort_values('cluster')
 
-    for idx, row in enumerate(profile_region.itertuples()):
+    for row in profile_region.itertuples():
         c = int(row.cluster)
         nama_segmen = buat_nama_segmen(
             row.sektor_makro_dominan, row.kelompok_tahun_berdiri_dominan,
@@ -222,8 +291,9 @@ def generate_cluster_profiles(df_region, profile_region):
             'top_sektor_pct': row.sektor_makro_pct,
             'top_usia': row.kelompok_tahun_berdiri_dominan,
             'top_usia_pct': row.kelompok_tahun_berdiri_pct,
-            'border': CLUSTER_COLORS[idx % len(CLUSTER_COLORS)],
-            'bg': CLUSTER_BG[idx % len(CLUSTER_BG)],
+            # Warna mengikuti id klaster supaya sama dengan warna sel heatmap
+            'border': CLUSTER_COLORS[c % len(CLUSTER_COLORS)],
+            'bg': CLUSTER_BG[c % len(CLUSTER_BG)],
             'lq': row.lq if pd.notna(row.lq) else None,
             'label_ocean': row.label_ocean,
             'warna_ocean': row.warna_ocean,
@@ -232,9 +302,120 @@ def generate_cluster_profiles(df_region, profile_region):
     df['nama_segmen'] = df['cluster'].map(label_map)
     return df, cluster_profiles
 
+def tampilkan_peta_sektor(hasil_sektor):
+    """Peta choropleth 6 wilayah DKI (Folium/Leaflet): warna poligon = label Ocean sektor
+    terpilih (LQ per wilayah administrasi). Klaster tidak dipetakan karena tidak bersifat
+    spasial. Jika GeoJSON/folium tidak tersedia, cukup tampilkan st.info (tidak error)."""
+    if not FOLIUM_TERSEDIA:
+        st.info("Peta tidak ditampilkan karena paket `folium` dan `streamlit-folium` belum terpasang. Jalankan `pip install -r requirements.txt`.")
+        return
+
+    geojson, pesan_error = load_geojson()
+    if pesan_error is not None:
+        st.info(
+            f"🗺️ Peta tidak ditampilkan: {pesan_error} Taruh berkas GeoJSON batas 6 wilayah DKI Jakarta "
+            f"(dengan properti `CC_2` berisi kode wilayah BPS: {', '.join(KODE_WILAYAH)}) di `data/geo/{GEOJSON_FILENAME}` "
+            f"-- lihat `data/geo/README.md`. Tabel dan grafik batang di bawah tetap berlaku."
+        )
+        return
+
+    # Sisipkan atribut sektor terpilih ke properti tiap poligon (untuk warna & tooltip)
+    data_wilayah = hasil_sektor.set_index('wilayah').to_dict('index')
+    geojson = copy.deepcopy(geojson)
+    for ft in geojson['features']:
+        prop = ft['properties']
+        baris = data_wilayah.get(prop['wilayah'])
+        lq = baris['lq'] if baris is not None else None
+        prop['n_usaha'] = f"{int(baris['n_usaha']):,}" if baris is not None else "0"
+        prop['lq_teks'] = f"{lq:.2f}" if lq is not None and pd.notna(lq) else "N/A"
+        prop['label'] = baris['label'] if baris is not None else "Data Terbatas"
+        prop['warna'] = baris['warna'] if baris is not None else "gray"
+        # Nama pendek untuk tooltip, mis. "KOTA ADM. JAKARTA SELATAN" -> "Jakarta Selatan"
+        prop['nama_pendek'] = prop['wilayah'].replace("KOTA ADM. ", "").replace("KAB. ADM. ", "").title()
+
+    # Batas tampilan awal = batas gabungan seluruh poligon (termasuk Kep. Seribu di utara)
+    semua_titik = [
+        titik
+        for ft in geojson['features']
+        for poligon in (ft['geometry']['coordinates'] if ft['geometry']['type'] == 'MultiPolygon' else [ft['geometry']['coordinates']])
+        for cincin in poligon
+        for titik in cincin
+    ]
+    batas_peta = [
+        [min(t[1] for t in semua_titik), min(t[0] for t in semua_titik)],
+        [max(t[1] for t in semua_titik), max(t[0] for t in semua_titik)],
+    ]
+
+    # Tanpa basemap (tiles=None): hanya poligon dari GeoJSON, latar transparen mengikuti tema halaman
+    peta = folium.Map(
+        tiles=None, attribution_control=False, zoom_control=False,
+        min_zoom=8, max_zoom=14, zoom_snap=0.1,
+    )
+    peta.get_root().header.add_child(folium.Element(
+        "<style>html, body, .folium-map, .leaflet-container { background: transparent !important; }</style>"
+    ))
+    folium.GeoJson(
+        geojson,
+        name="Wilayah DKI Jakarta",
+        # Pulau-pulau Kep. Seribu sangat kecil pada skala ini, jadi diberi garis tepi tebal
+        # berwarna sama dengan isinya supaya tetap terlihat sebagai titik-titik pulau
+        style_function=lambda ft: {
+            'fillColor': BADGE_WARNA[ft['properties']['warna']],
+            'color': BADGE_WARNA[ft['properties']['warna']] if ft['properties']['wilayah'] == WILAYAH_KEP_SERIBU else '#FFFFFF',
+            'weight': 4 if ft['properties']['wilayah'] == WILAYAH_KEP_SERIBU else 1.2,
+            'fillOpacity': 0.85,
+        },
+        highlight_function=lambda ft: {'fillOpacity': 1.0, 'weight': 6 if ft['properties']['wilayah'] == WILAYAH_KEP_SERIBU else 3},
+        # Tooltip ringkas (nama pendek, label singkat, font kecil) supaya tidak terpotong tepi peta
+        tooltip=folium.GeoJsonTooltip(
+            fields=['nama_pendek', 'n_usaha', 'lq_teks', 'label'],
+            aliases=['Wilayah', 'Usaha', 'LQ', 'Label'],
+            sticky=True,
+            style=(
+                "background-color: #FFFFFF; color: #111827; font-size: 11.5px; "
+                "padding: 4px 8px; border: 1px solid #D1D5DB; border-radius: 6px; "
+                "box-shadow: 0 2px 6px rgba(0,0,0,0.25); white-space: nowrap;"
+            ),
+        ),
+    ).add_to(peta)
+
+    # Label "Kep. Seribu" di samping kanan gugusan pulau (titik-titik kecil sulit dikenali tanpa label);
+    # posisinya = rata-rata titik pulau, jadi mengikuti pusat gugusan, bukan pulau terluar
+    ft_seribu = next((ft for ft in geojson['features'] if ft['properties']['wilayah'] == WILAYAH_KEP_SERIBU), None)
+    if ft_seribu is not None:
+        titik_seribu = [t for poligon in ft_seribu['geometry']['coordinates'] for cincin in poligon for t in cincin]
+        lat_tengah = sum(t[1] for t in titik_seribu) / len(titik_seribu)
+        lon_tengah = sum(t[0] for t in titik_seribu) / len(titik_seribu)
+        folium.Marker(
+            [lat_tengah, lon_tengah],
+            icon=folium.DivIcon(
+                icon_size=(80, 20), icon_anchor=(-24, 10),
+                html=(
+                    '<div style="font-size:11px;font-weight:600;color:#111827;background:rgba(255,255,255,0.9);'
+                    'padding:1px 6px;border-radius:8px;white-space:nowrap;display:inline-block;">Kep. Seribu</div>'
+                ),
+            ),
+        ).add_to(peta)
+
+    peta.fit_bounds(batas_peta, padding=(14, 14))
+
+    # Peta tinggi-ramping (bentuk DKI + Kep. Seribu memanjang ke utara), lebar tetap di kolom tengah
+    _, kolom_peta, _ = st.columns([1, 1.1, 1])
+    with kolom_peta:
+        st_folium(peta, width=360, height=560, returned_objects=[], key="peta_sektor")
+
+        legend_html = " &nbsp; ".join(
+            f'<span style="white-space:nowrap;"><span style="display:inline-block;width:11px;height:11px;background:{BADGE_WARNA[w]};border-radius:2px;vertical-align:middle;"></span> {nama}</span>'
+            for w, nama in [('blue', 'Blue Ocean (LQ < 0.8)'), ('yellow', 'Neutral Ocean (0.8–1.25)'),
+                            ('red', 'Red Ocean (LQ > 1.25)'), ('gray', 'Data Terbatas')]
+        )
+        st.markdown(f'<div style="font-size:12px;text-align:center;line-height:1.8;">{legend_html}</div>', unsafe_allow_html=True)
+    st.caption("Peta menampilkan konsentrasi sektor (LQ) per wilayah administrasi, bukan sebaran klaster. Kep. Seribu (pulau-pulau kecil di bagian atas peta) dapat diperbesar dengan scroll.")
+
 # Memuat data
 df_all = load_kmodes_data()
 df_elbow_all = load_elbow_data()
+df_k_opt_all = load_k_optimal()
 df_eval_all = load_evaluation_summary()
 
 if df_all is None:
@@ -252,7 +433,6 @@ REFERENSI_LQ = hitung_referensi_lq(df_all)
 # ==========================================
 # 4. SIDEBAR: FILTER WILAYAH & PENCARIAN
 # ==========================================
-st.sidebar.image("https://satudata.jakarta.go.id/assets/images/logo-dark.png", width=180)
 st.sidebar.header("📍 Filter Wilayah")
 
 daftar_wilayah = sorted(df_all['wilayah'].unique().tolist())
@@ -263,6 +443,14 @@ profile_wilayah = df_eval_all[df_eval_all['wilayah'] == selected_wilayah].copy()
 df_wilayah, profiles = generate_cluster_profiles(df_wilayah_raw, profile_wilayah)
 
 elbow_wilayah = df_elbow_all[df_elbow_all['wilayah'] == selected_wilayah].sort_values('k') if df_elbow_all is not None else None
+
+# k wilayah terpilih: dari 02c_k_optimal.csv; kalau berkas belum ada, pakai jumlah klaster di dataset
+k_opt_wilayah = None
+if df_k_opt_all is not None:
+    baris_k = df_k_opt_all[df_k_opt_all['wilayah'] == selected_wilayah]
+    if not baris_k.empty:
+        k_opt_wilayah = baris_k.iloc[0]
+k_wilayah = int(k_opt_wilayah['k_optimal']) if k_opt_wilayah is not None else int(df_wilayah_raw['cluster'].nunique())
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔍 Cari Komoditas Usaha")
@@ -282,9 +470,11 @@ st.sidebar.caption("💡 *Sistem Segmentasi UMKM DKI Jakarta - Algoritma K-Modes
 # 5. JUDUL APLIKASI & TAB UTAMA
 # ==========================================
 st.markdown('<div class="main-title">Peta Segmentasi & Peluang Usaha UMKM DKI Jakarta</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Segmentasi Data Terbuka Berbasis K-Modes Clustering (Periode 2024) & Klasifikasi Red/Blue Ocean Berbasis Location Quotient</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Segmentasi Data Terbuka Berbasis K-Modes Clustering (Periode 2024) & Penerapan Red/Blue Ocean Menggunakan Location Quotient</div>', unsafe_allow_html=True)
 
-tab_wilayah, tab_sektor = st.tabs(["📍 Analisis per Wilayah", "📊 Perbandingan Sektor Lintas Wilayah"])
+tab_wilayah, tab_sektor, tab_k = st.tabs([
+    "📍 Analisis per Wilayah", "📊 Perbandingan Sektor Lintas Wilayah", "📉 Evaluasi Jumlah Klaster (k)"
+])
 
 # ==========================================
 # TAB 1: ANALISIS PER WILAYAH (alur yang sudah ada)
@@ -301,7 +491,7 @@ with tab_wilayah:
     with kpi3:
         st.metric("Sektor Terbesar", df_wilayah['sektor_makro'].mode()[0])
     with kpi4:
-        st.metric("Jumlah Segmen", f"{len(profiles)} Klaster", help="Jumlah segmen UMKM di wilayah ini, ditentukan lewat kurva Elbow (lihat notebooks/02_kmodes_partitioning.ipynb).")
+        st.metric("Jumlah Segmen", f"{k_wilayah} Klaster", help="Jumlah segmen (k) UMKM di wilayah ini, dihitung dengan aturan titik terjauh dari garis lurus pada kurva Elbow k=2..6 (lihat tab Evaluasi Jumlah Klaster dan notebooks/02_kmodes_partitioning.ipynb).")
 
     st.markdown("---")
 
@@ -309,10 +499,7 @@ with tab_wilayah:
     # KARTU PROFIL KLASTER MULTIDIMENSI
     # ==========================================
     st.subheader("💡 Profil Klaster (Sektor × Usia Usaha)")
-    profiles_terurut = sorted(
-        profiles.items(),
-        key=lambda item: item[1]['lq'] if item[1]['lq'] is not None else float('inf')
-    )
+    profiles_terurut = sorted(profiles.items(), key=lambda item: item[1]['pct'], reverse=True)
     cols_kartu = st.columns(len(profiles_terurut))
 
     for idx, (c_name, info) in enumerate(profiles_terurut):
@@ -342,6 +529,10 @@ with tab_wilayah:
                 </div>
             """, unsafe_allow_html=True)
 
+    # LQ klaster = LQ sektor dominannya di wilayah ini, jadi sektor dominan sama -> badge Ocean identik
+    if len({info['top_sektor'] for info in profiles.values()}) == 1:
+        st.caption("Sektor dominan sama di seluruh klaster, perbandingan Ocean antar-sektor ada di tab Perbandingan Sektor")
+
     # ==========================================
     # PETA KLASTER: HEATMAP SEKTOR x USIA USAHA
     # ==========================================
@@ -365,35 +556,14 @@ with tab_wilayah:
 
     fig_heatmap = go.Figure(go.Heatmap(
         z=pivot_cluster.values, x=[u.split(' (')[0] for u in USIA_ORDER], y=sektor_order_wilayah,
-        colorscale=discrete_colorscale(CLUSTER_COLORS[:K_FINAL]), zmin=-0.5, zmax=K_FINAL - 0.5,
+        colorscale=discrete_colorscale(CLUSTER_COLORS[:k_wilayah]), zmin=-0.5, zmax=k_wilayah - 0.5,
         text=text_matrix, texttemplate="%{text}", textfont={"size": 11},
         hovertemplate="Sektor: %{y}<br>Usia Usaha: %{x}<br>%{text}<extra></extra>",
         xgap=4, ygap=4,
-        colorbar=dict(title="Klaster", tickmode="array", tickvals=list(range(K_FINAL)), ticktext=[f"Klaster {i}" for i in range(K_FINAL)]),
+        colorbar=dict(title="Klaster", tickmode="array", tickvals=list(range(k_wilayah)), ticktext=[f"Klaster {i}" for i in range(k_wilayah)]),
     ))
     fig_heatmap.update_layout(margin=dict(t=20, b=10, l=10, r=10), height=380)
     st.plotly_chart(fig_heatmap, width='stretch')
-
-    # ==========================================
-    # BAGAIMANA JUMLAH SEGMEN (k) DITENTUKAN (detail teknis, collapsed by default)
-    # ==========================================
-    st.markdown("---")
-    with st.expander("🔍 Bagaimana jumlah segmen (k) ditentukan?", expanded=False):
-        st.caption(f"Kurva biaya (Elbow) untuk kandidat k=2..6 — {selected_wilayah}, dari notebooks/02_kmodes_partitioning.ipynb. Jumlah segmen final ditentukan murni dari titik di mana penurunan biaya mulai melandai, dikombinasikan dengan pertimbangan kepraktisan interpretasi.")
-        if elbow_wilayah is not None and not elbow_wilayah.empty:
-            fig_elbow = go.Figure()
-            fig_elbow.add_trace(go.Scatter(
-                x=elbow_wilayah['k'], y=elbow_wilayah['cost'],
-                mode='lines+markers', line=dict(color='#2563EB', width=3), marker=dict(size=9)
-            ))
-            fig_elbow.add_vline(x=K_FINAL, line_dash="dash", line_color="#EF4444", annotation_text=f"k final = {K_FINAL}")
-            fig_elbow.update_layout(
-                xaxis_title="Jumlah Klaster (k)", yaxis_title="Nilai Cost",
-                margin=dict(t=20, b=10, l=10, r=10), height=300
-            )
-            st.plotly_chart(fig_elbow, width='stretch')
-        else:
-            st.info("Data kurva biaya untuk wilayah ini belum tersedia.")
 
     # ==========================================
     # VISUALISASI KOMPOSISI & KOMODITAS
@@ -404,15 +574,31 @@ with tab_wilayah:
         st.subheader("Komposisi Segmen UMKM")
         cluster_counts = df_wilayah['nama_segmen'].value_counts().reset_index()
         cluster_counts.columns = ['Segmen', 'Jumlah UMKM']
+        # Urut menurut id klaster supaya urutan legend sama dengan kartu profil & heatmap
+        cluster_counts['id'] = cluster_counts['Segmen'].map({nama: info['id'] for nama, info in profiles.items()})
+        cluster_counts = cluster_counts.sort_values('id')
 
         fig_pie = px.pie(
             cluster_counts,
             values='Jumlah UMKM',
             names='Segmen',
-            hole=0.45,
-            color_discrete_sequence=CLUSTER_COLORS
+            hole=0.5,
+            color='Segmen',
+            color_discrete_map={nama: info['border'] for nama, info in profiles.items()},
+            category_orders={'Segmen': cluster_counts['Segmen'].tolist()},
         )
-        fig_pie.update_layout(margin=dict(t=20, b=10, l=10, r=10), height=340)
+        # Persentase di dalam irisan, legend di bawah donut (nama segmen panjang tidak memakan lebar donut);
+        # tinggi 430 px menyamai kolom kanan (selectbox + grafik batang 340 px)
+        fig_pie.update_traces(
+            sort=False, texttemplate='%{percent:.1%}', textposition='inside', insidetextorientation='horizontal',
+            textfont=dict(size=13, color='white'),
+            hovertemplate="%{label}<br>%{value:,} UMKM (%{percent})<extra></extra>",
+        )
+        fig_pie.update_layout(
+            height=430, margin=dict(t=10, b=10, l=10, r=10),
+            legend=dict(orientation='h', yanchor='top', y=-0.02, xanchor='center', x=0.5, font=dict(size=11)),
+            uniformtext=dict(minsize=10, mode='hide'),
+        )
         st.plotly_chart(fig_pie, width='stretch')
 
     with col_viz2:
@@ -434,27 +620,6 @@ with tab_wilayah:
         )
         fig_bar.update_layout(yaxis=dict(autorange="reversed"), margin=dict(t=20, b=10, l=10, r=10), height=340, coloraxis_showscale=False)
         st.plotly_chart(fig_bar, width='stretch')
-
-    # ==========================================
-    # PANEL PEMBANDING: PROFIL KLASTER VS FREKUENSI SEDERHANA
-    # ==========================================
-    with st.expander("📊 Bandingkan dengan Distribusi Frekuensi Sektor Sederhana (nilai tambah clustering 2 fitur)"):
-        freq_dist = (df_wilayah['sektor_makro'].value_counts(normalize=True) * 100).reset_index()
-        freq_dist.columns = ['Sektor Makro', 'Persentase Populasi (%)']
-
-        col_cmp1, col_cmp2 = st.columns(2)
-        with col_cmp1:
-            st.markdown("**Baseline: Frekuensi `sektor_makro` saja**")
-            st.dataframe(freq_dist.round(2), width='stretch', hide_index=True)
-        with col_cmp2:
-            st.markdown("**Profil Klaster Multivariat (Sektor × Usia)**")
-            tabel_profil = profile_wilayah[[
-                'cluster', 'pct_n', 'sektor_makro_dominan', 'sektor_makro_pct',
-                'kelompok_tahun_berdiri_dominan', 'kelompok_tahun_berdiri_pct'
-            ]].copy().round(2)
-            tabel_profil.columns = ['Klaster', 'Populasi (%)', 'Sektor Dominan', 'Sektor (%)', 'Usia Dominan', 'Usia (%)']
-            st.dataframe(tabel_profil, width='stretch', hide_index=True)
-        st.caption("Klaster dengan kombinasi sektor × usia usaha yang spesifik (mis. sektor tertentu didominasi usaha rintisan baru) tidak terlihat dari tabel frekuensi sektor saja di sisi kiri.")
 
     # ==========================================
     # TABEL EKSPLORASI DAFTAR USAHA
@@ -524,8 +689,19 @@ with tab_sektor:
     if hasil_sektor.empty:
         st.warning(f"Tidak ada data untuk sektor '{sektor_terpilih}' di wilayah manapun.")
     else:
-        wilayah_top = hasil_sektor.iloc[0]
-        st.info(f"Untuk sektor **{sektor_terpilih}**, wilayah dengan tingkat konsentrasi terendah (paling Blue Ocean) untuk sektor ini adalah **{wilayah_top['wilayah']}** (LQ {wilayah_top['lq']}).")
+        lq_valid = hasil_sektor[hasil_sektor['lq'].notna()]
+        if lq_valid.empty:
+            st.info(f"Location Quotient (LQ) sektor **{sektor_terpilih}** tidak dapat dihitung untuk wilayah mana pun.")
+        else:
+            tertinggi = lq_valid.loc[lq_valid['lq'].idxmax()]
+            terendah = lq_valid.loc[lq_valid['lq'].idxmin()]
+            st.info(
+                f"Sektor **{sektor_terpilih}** paling terkonsentrasi di **{tertinggi['wilayah']}** "
+                f"(LQ {tertinggi['lq']:.2f}, {tertinggi['label']}) dan paling longgar di **{terendah['wilayah']}** "
+                f"(LQ {terendah['lq']:.2f}, {terendah['label']})."
+            )
+
+        tampilkan_peta_sektor(hasil_sektor)
 
         tabel_sektor = hasil_sektor[[
             'wilayah', 'n_usaha', 'lq', 'label'
@@ -561,5 +737,62 @@ with tab_sektor:
         with st.expander("Apa itu Red/Blue Ocean?", expanded=False):
             st.caption(OCEAN_TOOLTIP)
 
+# ==========================================
+# TAB 3: EVALUASI JUMLAH KLASTER (k)
+# ==========================================
+with tab_k:
+    st.subheader("📉 Evaluasi Jumlah Klaster (k) per Wilayah")
+
+    if df_k_opt_all is None:
+        st.info("Berkas `02c_k_optimal.csv` belum tersedia. Jalankan `notebooks/02_kmodes_partitioning.ipynb` terlebih dahulu.")
+    else:
+        tabel_k = df_k_opt_all[['wilayah', 'k_optimal', 'kekuatan_siku', 'catatan']].copy()
+        tabel_k.columns = ['Wilayah', 'k Optimal', 'Kekuatan Siku', 'Catatan']
+        st.dataframe(
+            tabel_k,
+            column_config={
+                "Wilayah": st.column_config.TextColumn("Wilayah", width="medium"),
+                "Kekuatan Siku": st.column_config.NumberColumn(
+                    "Kekuatan Siku (d)", format="%.4f",
+                    help="Jarak titik k optimal ke garis lurus pada kurva Elbow ternormalisasi. Makin besar, makin tegas sikunya."
+                ),
+                "Catatan": st.column_config.TextColumn("Catatan", width="large"),
+            },
+            width='stretch',
+            hide_index=True,
+        )
+
+    st.markdown(f"**Kurva Elbow — {selected_wilayah}**")
+    if elbow_wilayah is not None and not elbow_wilayah.empty:
+        fig_elbow = go.Figure()
+        fig_elbow.add_trace(go.Scatter(
+            x=elbow_wilayah['k'], y=elbow_wilayah['cost'], name='Cost',
+            mode='lines+markers', line=dict(color='#2563EB', width=3), marker=dict(size=9)
+        ))
+        # Garis lurus penghubung titik pertama-terakhir (acuan aturan titik terjauh)
+        fig_elbow.add_trace(go.Scatter(
+            x=elbow_wilayah['k'].iloc[[0, -1]], y=elbow_wilayah['cost'].iloc[[0, -1]], name='Garis acuan',
+            mode='lines', line=dict(color='#9CA3AF', width=1.5, dash='dot')
+        ))
+        teks_k = f"k optimal = {k_wilayah}"
+        if k_opt_wilayah is not None:
+            teks_k += f" (d = {k_opt_wilayah['kekuatan_siku']:.3f})"
+        fig_elbow.add_vline(x=k_wilayah, line_dash="dash", line_color="#EF4444", annotation_text=teks_k)
+        fig_elbow.update_layout(
+            xaxis_title="Jumlah Klaster (k)", yaxis_title="Nilai Cost", showlegend=False,
+            xaxis=dict(tickmode='array', tickvals=elbow_wilayah['k'].tolist()),
+            margin=dict(t=30, b=10, l=10, r=10), height=340
+        )
+        st.plotly_chart(fig_elbow, width='stretch')
+    else:
+        st.info("Data kurva biaya untuk wilayah ini belum tersedia.")
+
+    if df_k_opt_all is not None:
+        siku_lemah = df_k_opt_all[df_k_opt_all['wilayah'].isin(['KOTA ADM. JAKARTA BARAT', 'KOTA ADM. JAKARTA UTARA'])]
+        rincian = "; ".join(
+            f"{r.wilayah}: d = {r.kekuatan_siku:.3f} pada k={r.k_optimal}, hanya berselisih {r.selisih_d:.4f} dari k={r.k_pembanding}"
+            for r in siku_lemah.itertuples()
+        )
+
 st.markdown("---")
-st.caption("Aplikasi Analitik Segmentasi UMKM DKI Jakarta | K-Modes Clustering (Sektor Makro × Usia Usaha) | Evaluasi: Elbow Cost Curve")
+st.caption("Aplikasi Analitik Segmentasi UMKM DKI Jakarta | K-Modes Clustering (Sektor Makro × Usia Usaha) | Penentuan k: Kurva Elbow (Titik Terjauh dari Garis Lurus)")

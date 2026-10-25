@@ -1,0 +1,7 @@
+wilayah,k_optimal,kekuatan_siku,k_pembanding,selisih_d,catatan
+KAB. ADM. KEP. SERIBU,4,0.1898,3,0.0121,k pembanding = 3 (selisih d = 0.0121)
+KOTA ADM. JAKARTA BARAT,4,0.0775,3,0.0016,k pembanding = 3 (selisih d = 0.0016)
+KOTA ADM. JAKARTA PUSAT,3,0.1966,4,0.0726,k pembanding = 4 (selisih d = 0.0726)
+KOTA ADM. JAKARTA SELATAN,3,0.1976,4,0.0703,k pembanding = 4 (selisih d = 0.0703)
+KOTA ADM. JAKARTA TIMUR,3,0.1258,5,0.0319,k pembanding = 5 (selisih d = 0.0319)
+KOTA ADM. JAKARTA UTARA,4,0.0903,3,0.0057,k pembanding = 3 (selisih d = 0.0057)
