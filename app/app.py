@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import os
+import io
 import copy
 import json
 
@@ -160,7 +161,7 @@ def load_geojson():
 def load_evaluation_summary():
     """Memuat tabel profil klaster final (k optimal per wilayah) -- kategori dominan
     deskriptif, Location Quotient (LQ), dan label Red/Neutral/Blue Ocean per
-    klaster -- dari notebooks/03_interpretasi_dan_klasifikasi_ocean.ipynb."""
+    klaster -- dari notebooks/03_interpretasi_dan_penerapan_ocean.ipynb."""
     path = _find_path("03_kmodes_evaluation_summary.csv")
     if path is None:
         return None
@@ -267,7 +268,7 @@ def generate_cluster_profiles(df_region, profile_region):
     """Menyusun profil klaster 2-dimensi (sektor, usia usaha) berbasis tabel profil
     final (03_kmodes_evaluation_summary.csv) yang sudah berisi kategori dominan
     deskriptif, Location Quotient (LQ), dan label Red/Neutral/Blue Ocean per klaster
-    -- dihitung di notebooks/03_interpretasi_dan_klasifikasi_ocean.ipynb, bukan
+    -- dihitung di notebooks/03_interpretasi_dan_penerapan_ocean.ipynb, bukan
     dihitung ulang di sini -- lalu menyematkan nama segmen ke data mentah wilayah tsb."""
     df = df_region.copy()
     cluster_profiles = {}
@@ -412,6 +413,33 @@ def tampilkan_peta_sektor(hasil_sektor):
         st.markdown(f'<div style="font-size:12px;text-align:center;line-height:1.8;">{legend_html}</div>', unsafe_allow_html=True)
     st.caption("Peta menampilkan konsentrasi sektor (LQ) per wilayah administrasi, bukan sebaran klaster. Kep. Seribu (pulau-pulau kecil di bagian atas peta) dapat diperbesar dengan scroll.")
 
+@st.cache_data(show_spinner="Menyiapkan berkas Excel...")
+def buat_excel_segmentasi(df_data, df_ringkasan):
+    """Menyusun berkas Excel (.xlsx) 2 sheet -- 'Data Segmentasi' (daftar usaha) dan
+    'Ringkasan Segmen' (profil tiap klaster) -- dengan header tebal yang dibekukan,
+    filter di tiap kolom, dan lebar kolom menyesuaikan isi. Di-cache per wilayah."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for nama_sheet, d in [("Data Segmentasi", df_data), ("Ringkasan Segmen", df_ringkasan)]:
+            d.to_excel(writer, sheet_name=nama_sheet, index=False)
+            ws = writer.sheets[nama_sheet]
+
+            for sel in ws[1]:
+                sel.font = Font(bold=True, color="FFFFFF")
+                sel.fill = PatternFill("solid", fgColor="1E3A8A")
+                sel.alignment = Alignment(vertical="center")
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+
+            # Lebar kolom = teks terpanjang (header atau isi), dibatasi agar tidak terlalu lebar
+            for i, kolom in enumerate(d.columns, start=1):
+                panjang_isi = d[kolom].astype(str).str.len().max() if len(d) else 0
+                ws.column_dimensions[get_column_letter(i)].width = min(max(len(str(kolom)), panjang_isi) + 3, 60)
+    return buffer.getvalue()
+
 # Memuat data
 df_all = load_kmodes_data()
 df_elbow_all = load_elbow_data()
@@ -423,7 +451,7 @@ if df_all is None:
     st.stop()
 
 if df_eval_all is None:
-    st.error("⚠️ Berkas `03_kmodes_evaluation_summary.csv` tidak ditemukan! Jalankan `notebooks/03_interpretasi_dan_klasifikasi_ocean.ipynb` terlebih dahulu.")
+    st.error("⚠️ Berkas `03_kmodes_evaluation_summary.csv` tidak ditemukan! Jalankan `notebooks/03_interpretasi_dan_penerapan_ocean.ipynb` terlebih dahulu.")
     st.stop()
 
 # Referensi distribusi sektor se-DKI Jakarta untuk Location Quotient (LQ) --
@@ -666,12 +694,27 @@ with tab_wilayah:
     # ==========================================
     # UNDUH DATA
     # ==========================================
-    csv_export = df_wilayah[['wilayah'] + kolom_tampil].to_csv(index=False).encode('utf-8')
+    data_export = df_wilayah[['wilayah'] + kolom_tampil].rename(columns={
+        'wilayah': 'Wilayah', 'jenis_usaha': 'Jenis Usaha', 'sektor_makro': 'Sektor Makro',
+        'kelompok_tahun_berdiri': 'Usia Usaha', 'nama_segmen': 'Segmen',
+    })
+    ringkasan_export = pd.DataFrame([
+        {
+            'Klaster': info['id'], 'Segmen': nama, 'Jumlah UMKM': info['total'],
+            'Porsi Populasi (%)': round(info['pct'], 2),
+            'Sektor Dominan': info['top_sektor'], 'Porsi Sektor Dominan (%)': round(info['top_sektor_pct'], 2),
+            'Usia Usaha Dominan': info['top_usia'], 'Porsi Usia Dominan (%)': round(info['top_usia_pct'], 2),
+            'LQ': round(info['lq'], 3) if info['lq'] is not None else None, 'Label Ocean': info['label_ocean'],
+        }
+        for nama, info in sorted(profiles.items(), key=lambda item: item[1]['id'])
+    ])
+    xlsx_export = buat_excel_segmentasi(data_export, ringkasan_export)
+    nama_file = selected_wilayah.lower().replace('.', '').replace(' ', '_')
     st.download_button(
-        label=f"📥 Unduh Data Segmentasi {selected_wilayah} (CSV)",
-        data=csv_export,
-        file_name=f"segmentasi_{selected_wilayah.lower().replace(' ', '_')}.csv",
-        mime="text/csv"
+        label=f"📥 Unduh Data Segmentasi {selected_wilayah} (Excel)",
+        data=xlsx_export,
+        file_name=f"segmentasi_{nama_file}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
 # ==========================================
