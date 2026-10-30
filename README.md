@@ -125,7 +125,7 @@ Notebook 02 membutuhkan waktu sekitar 1 menit, karena K-Modes dijalankan untuk k
 
 ## Ringkasan Metode
 
-1. **Fitur:** `sektor_makro` (6 sektor) dan `kelompok_tahun_berdiri` (Rintisan Baru 2024, Usaha Berkembang 2022–2023, Usaha Lama 2020–2021).
+1. **Fitur:** `sektor_makro` (6 sektor) dan `kelompok_tahun_berdiri` (Kelompok A 2020–2021, Kelompok B 2022–2023, Kelompok C 2024).
 2. **Clustering:** K-Modes (`init='Cao'`, `n_init=5`, `random_state=42`), dijalankan terpisah untuk tiap wilayah.
 3. **Penentuan jumlah klaster (k):** dihitung per wilayah dari kurva Elbow (k = 2..6) dengan aturan *titik terjauh dari garis lurus*. Kedua sumbu dinormalisasi ke 0..1, lalu k optimal adalah titik dengan jarak terbesar ke garis yang menghubungkan titik pertama dan terakhir kurva. Hasilnya: k = 3 untuk Jakarta Pusat, Selatan, dan Timur, serta k = 4 untuk Jakarta Barat, Utara, dan Kep. Seribu.
 4. **Klasifikasi Ocean (Location Quotient):** LQ = porsi sektor di suatu wilayah ÷ porsi sektor yang sama se-DKI Jakarta.

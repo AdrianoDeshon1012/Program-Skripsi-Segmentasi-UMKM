@@ -232,7 +232,7 @@ def bandingkan_sektor_lintas_wilayah(d, sektor_terpilih, referensi_dki):
     result = pd.DataFrame(rows).sort_values('lq', ascending=True).reset_index(drop=True)
     return result
 
-USIA_ORDER = ['Rintisan Baru (2024)', 'Usaha Berkembang (2022-2023)', 'Usaha Lama (2020-2021)']
+USIA_ORDER = ['Kelompok A (2020-2021)', 'Kelompok B (2022-2023)', 'Kelompok C (2024)']
 
 def build_cluster_heatmap_data(df_region, sektor_order, usia_order=USIA_ORDER):
     """Crosstab sektor_makro x kelompok_tahun_berdiri -> klaster dominan + jumlah + persentase per sel."""
