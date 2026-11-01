@@ -777,8 +777,19 @@ with tab_sektor:
         )
         st.plotly_chart(fig_sektor, width='stretch')
 
-        with st.expander("Apa itu Red/Blue Ocean?", expanded=False):
-            st.caption(OCEAN_TOOLTIP)
+        with st.expander("Apa arti kepadatan Red, Neutral, dan Blue Ocean?", expanded=False):
+            st.markdown(
+                f"""
+Label ini menggambarkan **tingkat kepadatan** sektor usaha di suatu wilayah dibandingkan dengan rata-rata seluruh DKI Jakarta, diukur lewat Location Quotient (LQ).
+
+- 🔴 **Red Ocean (LQ > {LQ_BATAS_RED})**: sektor ini **lebih padat** dari rata-rata DKI Jakarta. Pelaku usaha di wilayah ini banyak, sehingga persaingan cenderung ketat.
+- 🟡 **Neutral Ocean (LQ {LQ_BATAS_BLUE}–{LQ_BATAS_RED})**: kepadatan sektor ini **sebanding** dengan rata-rata DKI Jakarta. Persaingan tidak menonjol, baik tinggi maupun rendah.
+- 🔵 **Blue Ocean (LQ < {LQ_BATAS_BLUE})**: sektor ini **lebih jarang** dari rata-rata DKI Jakarta. Pelaku usaha di wilayah ini sedikit, sehingga persaingan cenderung longgar dan ruang tumbuh lebih terbuka.
+- ⚪ **Data Terbatas**: jumlah usaha terlalu sedikit untuk dilabeli secara andal.
+
+LQ = (porsi sektor di wilayah) ÷ (porsi sektor di seluruh DKI Jakarta). LQ = 1 berarti kepadatannya persis sama dengan rata-rata DKI Jakarta.
+"""
+            )
 
 # ==========================================
 # TAB 3: EVALUASI JUMLAH KLASTER (k)
