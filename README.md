@@ -14,15 +14,14 @@ Aplikasi dapat langsung dibuka tanpa instalasi di:
 
 ## Fitur Aplikasi
 
-Aplikasi (dashboard Streamlit) terdiri dari 3 tab. Wilayah dipilih lewat sidebar.
+Aplikasi (dashboard Streamlit) terdiri dari 4 tab dan dapat dibuka dengan nyaman di HP maupun komputer.
 
 | Tab | Isi |
 |---|---|
-| 📍 **Analisis per Wilayah** | Ringkasan wilayah, kartu profil tiap klaster (sektor dan usia usaha dominan, label Ocean), heatmap klaster sektor × usia usaha, komposisi segmen, komoditas terbanyak per segmen, tabel daftar usaha, dan **unduh data dalam format Excel (.xlsx)** |
-| 📊 **Perbandingan Sektor Lintas Wilayah** | Pilih 1 sektor, lalu lihat LQ dan label Red/Neutral/Blue Ocean-nya di 6 wilayah dalam bentuk **peta choropleth**, tabel, dan grafik batang |
-| 📉 **Evaluasi Jumlah Klaster (k)** | Tabel k optimal per wilayah beserta kekuatan siku, dan kurva Elbow wilayah terpilih |
-
-Sidebar juga menyediakan pencarian jenis usaha (misalnya "Sablon", "Ikan", "Fesyen").
+| 📍 **Wilayah** | Pilih wilayah, lalu lihat ringkasan, kartu profil tiap klaster (sektor dan usia usaha dominan, label Ocean), dan jenis usaha terbanyak per segmen. Tersedia juga bagian yang bisa dibuka untuk daftar usaha, pencarian jenis usaha (misalnya "Sablon", "Ikan", "Fesyen"), komposisi segmen, dan heatmap klaster sektor × usia usaha, serta **unduh data dalam format Excel (.xlsx)** |
+| 📊 **Sektor** | Pilih 1 sektor, lalu lihat LQ dan label Red/Neutral/Blue Ocean-nya di 6 wilayah dalam bentuk **peta choropleth**, grafik batang, dan tabel |
+| ❓ **Bantuan** | Cara memakai dashboard, penjelasan Red/Neutral/Blue Ocean untuk orang awam, dan FAQ |
+| 📉 **Evaluasi** | Tabel k optimal per wilayah beserta kekuatan siku, dan kurva Elbow wilayah terpilih |
 
 ## Struktur Folder
 

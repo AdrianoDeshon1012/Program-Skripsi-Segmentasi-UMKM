@@ -6,10 +6,13 @@ import os
 import io
 import copy
 import json
+import textwrap
 
 # Folium (Leaflet) untuk peta choropleth -- opsional, aplikasi tetap jalan tanpanya
 try:
     import folium
+    from branca.element import MacroElement
+    from jinja2 import Template
     from streamlit_folium import st_folium
     FOLIUM_TERSEDIA = True
 except ImportError:
@@ -22,7 +25,7 @@ st.set_page_config(
     page_title="Peta Segmentasi UMKM DKI Jakarta",
     page_icon="🏪",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 FEATURES = ['sektor_makro', 'kelompok_tahun_berdiri']
@@ -56,24 +59,171 @@ LQ_BATAS_RED = 1.25
 
 BADGE_WARNA = {'blue': '#3B82F6', 'yellow': '#F59E0B', 'red': '#EF4444', 'gray': '#9CA3AF'}
 BADGE_EMOJI = {'blue': '🔵', 'yellow': '🟡', 'red': '🔴', 'gray': '⚪'}
+# Teks gelap di badge kuning, karena teks putih di atas kuning sulit dibaca
+BADGE_TEKS = {'blue': '#FFFFFF', 'yellow': '#111827', 'red': '#FFFFFF', 'gray': '#FFFFFF'}
 
 # Penjelasan istilah teknis dalam bahasa awam, dipakai lewat tooltip/help= di berbagai widget
 LQ_TOOLTIP = "LQ > 1 berarti sektor ini lebih padat di wilayah ini dibanding rata-rata DKI Jakarta; LQ < 1 berarti lebih jarang."
 OCEAN_TOOLTIP = "LQ membandingkan porsi sektor ini di satu wilayah terhadap porsi sektor ini di seluruh DKI Jakarta. LQ < 0.8 = kurang terwakili di wilayah ini (Blue Ocean). LQ > 1.25 = lebih padat dari rata-rata (Red Ocean)."
 
-# Kustomisasi CSS Tampilan
+# Arti tiap label Ocean dalam satu kalimat, ditampilkan di kartu segmen
+OCEAN_ARTI = {
+    'red': "Lebih padat dari rata-rata Jakarta",
+    'yellow': "Sebanding dengan rata-rata Jakarta",
+    'blue': "Lebih jarang dari rata-rata Jakarta",
+    'gray': "Data terlalu sedikit untuk dinilai",
+}
+
+# Penjelasan label Ocean untuk orang awam, dipakai di tab Wilayah, Sektor, dan Bantuan
+OCEAN_PENJELASAN = [
+    {
+        'warna': 'red', 'nama': 'Red Ocean', 'batas': f"LQ di atas {LQ_BATAS_RED}",
+        'arti': "Usaha di sektor ini sudah banyak di wilayah tersebut, sehingga persaingan cenderung ketat.",
+        'ibarat': "Satu jalan yang sudah dipenuhi penjual sejenis. Pembeli punya banyak pilihan.",
+        'saran': "Siapkan pembeda yang jelas, misalnya kualitas, harga, atau layanan.",
+    },
+    {
+        'warna': 'yellow', 'nama': 'Neutral Ocean', 'batas': f"LQ {LQ_BATAS_BLUE} sampai {LQ_BATAS_RED}",
+        'arti': "Kepadatan sektor ini sebanding dengan rata-rata Jakarta. Persaingannya tidak menonjol, baik tinggi maupun rendah.",
+        'ibarat': "Satu jalan dengan beberapa penjual sejenis. Ada pesaing, tetapi tidak berlebihan.",
+        'saran': "Lihat kondisi lokasi dan pesaing terdekat sebelum memutuskan.",
+    },
+    {
+        'warna': 'blue', 'nama': 'Blue Ocean', 'batas': f"LQ di bawah {LQ_BATAS_BLUE}",
+        'arti': "Usaha di sektor ini relatif sedikit di wilayah tersebut, sehingga persaingan cenderung longgar dan ruang tumbuh lebih terbuka.",
+        'ibarat': "Satu jalan yang baru punya sedikit penjual sejenis.",
+        'saran': "Pastikan pembelinya ada. Sepinya sektor bisa berarti peluang, bisa juga berarti permintaannya memang rendah.",
+    },
+]
+
+# Pertanyaan yang sering muncul, ditampilkan di tab Bantuan
+FAQ = [
+    ("Dashboard ini untuk apa?",
+     "Untuk melihat gambaran UMKM di tiap wilayah DKI Jakarta: sektor apa yang banyak, bagaimana usaha-usaha itu "
+     "dikelompokkan, dan sektor mana yang lebih padat atau lebih jarang dibanding rata-rata Jakarta."),
+    ("Apa itu segmen atau klaster?",
+     "Kelompok usaha yang mirip. Usaha dikelompokkan berdasarkan dua hal, yaitu sektor usaha dan tahun berdirinya, "
+     "menggunakan metode K-Modes. Pengelompokan dilakukan terpisah untuk tiap wilayah, jadi Klaster 0 di Jakarta Barat "
+     "tidak sama dengan Klaster 0 di Jakarta Timur."),
+    ("Apa arti Kelompok A, B, dan C?",
+     "Kelompok tahun berdirinya usaha. Kelompok A berdiri 2020-2021, Kelompok B berdiri 2022-2023, dan Kelompok C berdiri 2024."),
+    ("Apa itu LQ (Location Quotient)?",
+     "Angka yang membandingkan porsi suatu sektor di satu wilayah dengan porsi sektor yang sama di seluruh DKI Jakarta. "
+     "LQ = 1 berarti porsinya persis sama dengan rata-rata Jakarta.\n\n"
+     "Contoh: jika 30% usaha di suatu wilayah bergerak di kuliner, sedangkan porsi kuliner se-Jakarta 20%, maka "
+     f"LQ = 30% ÷ 20% = 1.5. Angka ini di atas {LQ_BATAS_RED}, sehingga labelnya Red Ocean."),
+    ("Apakah Blue Ocean pasti lebih menguntungkan?",
+     "Tidak. Label ini hanya menggambarkan kepadatan usaha, bukan keuntungan atau besarnya permintaan. Sektor yang jarang "
+     "bisa saja memang sedikit peminatnya, dan sektor yang padat bisa saja ramai pembeli. Gunakan label ini sebagai "
+     "bahan awal, lalu cek langsung kondisi di lapangan."),
+    ("Mengapa Red Ocean bisa muncul di wilayah yang jumlah usahanya sedikit?",
+     "Karena LQ membandingkan porsi, bukan jumlah. Kep. Seribu, misalnya, memiliki sedikit usaha, tetapi porsi sektor "
+     "agrobisnis dan perikanannya jauh lebih besar dari rata-rata Jakarta, sehingga labelnya Red Ocean."),
+    ("Mengapa beberapa segmen punya label Ocean yang sama?",
+     "Label Ocean segmen mengikuti sektor utamanya di wilayah tersebut. Segmen dengan sektor utama yang sama akan "
+     "mendapat nilai LQ dan label yang sama, meskipun usia usahanya berbeda."),
+    ("Apa arti Data Terbatas?",
+     f"Jumlah usaha di sektor tersebut kurang dari {MIN_N} unit atau porsinya kurang dari {MIN_PCT:.0f}% di wilayah itu. "
+     "Datanya terlalu sedikit untuk diberi label yang bisa diandalkan."),
+    ("Mengapa jumlah segmen tiap wilayah berbeda?",
+     "Jumlah segmen ditentukan dari pola data tiap wilayah menggunakan kurva Elbow, bukan disamakan untuk semua wilayah. "
+     "Rinciannya ada di tab Evaluasi."),
+    ("Bagaimana cara mengunduh datanya?",
+     "Buka tab Wilayah, pilih wilayahnya, lalu tekan tombol unduh di bagian paling bawah. Berkasnya berformat Excel (.xlsx)."),
+]
+
+# Kustomisasi CSS Tampilan. Warna teks umum mengikuti tema (terang/gelap) dari Streamlit.
+# Kolom grid menyesuaikan lebar layar, jadi kartu otomatis tersusun ke bawah di HP.
 st.markdown("""
     <style>
+    [data-testid="stMainBlockContainer"] {
+        max-width: 1100px;
+        padding-top: 2.5rem;
+    }
     .main-title {
         font-size: 26px;
         font-weight: 700;
-        color: #1E3A8A;
-        margin-bottom: 2px;
+        line-height: 1.25;
+        margin-bottom: 4px;
     }
     .sub-title {
         font-size: 15px;
-        color: #4B5563;
+        opacity: 0.75;
+        margin-bottom: 16px;
+    }
+    .grid-ringkasan {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 12px;
         margin-bottom: 20px;
+    }
+    .ringkasan-item {
+        background: rgba(128, 128, 128, 0.1);
+        border-radius: 8px;
+        padding: 12px 14px;
+    }
+    .ringkasan-label {
+        font-size: 13px;
+        opacity: 0.75;
+    }
+    .ringkasan-nilai {
+        font-size: 20px;
+        font-weight: 700;
+        line-height: 1.3;
+    }
+    .grid-kartu {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 12px;
+        margin-bottom: 16px;
+    }
+    .grid-kartu-lebar {
+        grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    }
+    .kartu {
+        border-radius: 8px;
+        padding: 14px;
+        color: #374151;
+        font-size: 14px;
+        line-height: 1.55;
+    }
+    .kartu-judul {
+        color: #111827;
+        font-size: 15px;
+        font-weight: 700;
+        margin-bottom: 6px;
+    }
+    .kartu-badge {
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 12px;
+        font-size: 12px;
+        font-weight: 600;
+        margin-top: 8px;
+    }
+    @media (max-width: 640px) {
+        [data-testid="stMainBlockContainer"] {
+            padding: 2.5rem 1rem 2rem 1rem;
+        }
+        .main-title {
+            font-size: 21px;
+        }
+        .sub-title {
+            font-size: 14px;
+        }
+        [data-testid="stMainBlockContainer"] h3 {
+            font-size: 1.2rem;
+        }
+        .grid-ringkasan {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+        }
+        .ringkasan-nilai {
+            font-size: 16px;
+        }
+        .grid-kartu {
+            grid-template-columns: minmax(0, 1fr);
+        }
     }
     </style>
 """, unsafe_allow_html=True)
@@ -303,6 +453,90 @@ def generate_cluster_profiles(df_region, profile_region):
     df['nama_segmen'] = df['cluster'].map(label_map)
     return df, cluster_profiles
 
+def nama_pendek_wilayah(wilayah):
+    """Nama wilayah yang mudah dibaca, mis. "KOTA ADM. JAKARTA SELATAN" -> "Jakarta Selatan"."""
+    return wilayah.replace("KOTA ADM. ", "").replace("KAB. ADM. ", "").title()
+
+def bungkus_label(teks, lebar=22):
+    """Memecah label sumbu yang panjang jadi beberapa baris supaya grafik tetap lega di layar HP."""
+    return "<br>".join(textwrap.wrap(teks, lebar, max_lines=3, placeholder="…"))
+
+def tampilkan_grafik(fig):
+    """Menampilkan grafik Plotly tanpa toolbar dan tanpa zoom/geser, supaya sentuhan di HP
+    tetap menggulir halaman, bukan menggeser isi grafik."""
+    fig.update_xaxes(fixedrange=True)
+    fig.update_yaxes(fixedrange=True)
+    fig.update_layout(dragmode=False)
+    st.plotly_chart(fig, width='stretch', config={'displayModeBar': False})
+
+def tampilkan_ringkasan(item):
+    """Baris angka ringkasan (label, nilai), 2 kolom di HP dan 1 baris di layar lebar."""
+    isi = "".join(
+        f'<div class="ringkasan-item"><div class="ringkasan-label">{label}</div>'
+        f'<div class="ringkasan-nilai">{nilai}</div></div>'
+        for label, nilai in item
+    )
+    st.markdown(f'<div class="grid-ringkasan">{isi}</div>', unsafe_allow_html=True)
+
+def tampilkan_kartu_segmen(profiles_terurut):
+    """Kartu profil tiap segmen. Warna garis tepi mengikuti id klaster, sama dengan heatmap dan pie chart."""
+    isi = ""
+    for nama, info in profiles_terurut:
+        warna = info['warna_ocean']
+        lq_text = f"{info['lq']:.2f}" if info['lq'] is not None else "N/A"
+        isi += (
+            f'<div class="kartu" style="background-color:{info["bg"]};border-left:5px solid {info["border"]};">'
+            f'<div class="kartu-judul">{nama}</div>'
+            f'<b>{info["total"]:,} UMKM</b> ({info["pct"]:.1f}% dari wilayah ini)<br>'
+            f'Sektor utama: {info["top_sektor"]} ({info["top_sektor_pct"]:.1f}%)<br>'
+            f'Usia usaha utama: {info["top_usia"]}, {info["top_usia_pct"]:.1f}%<br>'
+            f'<span class="kartu-badge" title="{OCEAN_TOOLTIP}" style="background-color:{BADGE_WARNA[warna]};color:{BADGE_TEKS[warna]};">'
+            f'{info["label_ocean"]} · LQ {lq_text}</span><br>'
+            f'{OCEAN_ARTI[warna]}'
+            f'</div>'
+        )
+    # 4 kartu disusun 2x2 di layar lebar supaya tidak ada 1 kartu tersisa sendirian di baris bawah
+    kelas = "grid-kartu grid-kartu-lebar" if len(profiles_terurut) == 4 else "grid-kartu"
+    st.markdown(f'<div class="{kelas}">{isi}</div>', unsafe_allow_html=True)
+
+def tampilkan_penjelasan_ocean():
+    """Penjelasan Red/Neutral/Blue Ocean untuk orang awam dalam bentuk kartu."""
+    isi = ""
+    for o in OCEAN_PENJELASAN:
+        warna = o['warna']
+        isi += (
+            f'<div class="kartu" style="background-color:#F9FAFB;border-left:5px solid {BADGE_WARNA[warna]};">'
+            f'<div class="kartu-judul">{BADGE_EMOJI[warna]} {o["nama"]}</div>'
+            f'<b>{OCEAN_ARTI[warna]}</b> ({o["batas"]}).<br>{o["arti"]}<br><br>'
+            f'<b>Ibaratnya:</b> {o["ibarat"]}<br>'
+            f'<b>Yang perlu diperhatikan:</b> {o["saran"]}'
+            f'</div>'
+        )
+    st.markdown(f'<div class="grid-kartu">{isi}</div>', unsafe_allow_html=True)
+    st.markdown(
+        "⚪ **Data Terbatas**: jumlah usahanya terlalu sedikit untuk diberi label.\n\n"
+        "Label ini hanya menggambarkan **kepadatan usaha**, bukan keuntungan. Gunakan sebagai bahan awal, lalu cek kondisi di lapangan."
+    )
+
+def buat_penyesuai_peta(batas_peta):
+    """Elemen Leaflet yang memasang batas tampilan setiap ukuran peta berubah. Peta dimuat saat
+    tab Sektor masih tersembunyi (lebar 0) dan fitBounds pada lebar 0 membuat posisi peta jadi NaN,
+    jadi batas tampilan baru dipasang ketika peta benar-benar terlihat, bukan lewat peta.fit_bounds()."""
+    elemen = MacroElement()
+    elemen._template = Template("""
+        {% macro script(this, kwargs) %}
+        (function () {
+            var peta = {{ this._parent.get_name() }};
+            new ResizeObserver(function () {
+                if (peta.getContainer().clientWidth === 0) return;
+                peta.invalidateSize(false);
+                peta.fitBounds(""" + json.dumps(batas_peta) + """, {padding: [14, 14], animate: false});
+            }).observe(peta.getContainer());
+        })();
+        {% endmacro %}
+    """)
+    return elemen
+
 def tampilkan_peta_sektor(hasil_sektor):
     """Peta choropleth 6 wilayah DKI (Folium/Leaflet): warna poligon = label Ocean sektor
     terpilih (LQ per wilayah administrasi). Klaster tidak dipetakan karena tidak bersifat
@@ -331,8 +565,7 @@ def tampilkan_peta_sektor(hasil_sektor):
         prop['lq_teks'] = f"{lq:.2f}" if lq is not None and pd.notna(lq) else "N/A"
         prop['label'] = baris['label'] if baris is not None else "Data Terbatas"
         prop['warna'] = baris['warna'] if baris is not None else "gray"
-        # Nama pendek untuk tooltip, mis. "KOTA ADM. JAKARTA SELATAN" -> "Jakarta Selatan"
-        prop['nama_pendek'] = prop['wilayah'].replace("KOTA ADM. ", "").replace("KAB. ADM. ", "").title()
+        prop['nama_pendek'] = nama_pendek_wilayah(prop['wilayah'])
 
     # Batas tampilan awal = batas gabungan seluruh poligon (termasuk Kep. Seribu di utara)
     semua_titik = [
@@ -347,10 +580,12 @@ def tampilkan_peta_sektor(hasil_sektor):
         [max(t[1] for t in semua_titik), max(t[0] for t in semua_titik)],
     ]
 
-    # Tanpa basemap (tiles=None): hanya poligon dari GeoJSON, latar transparen mengikuti tema halaman
+    # Tanpa basemap (tiles=None): hanya poligon dari GeoJSON, latar transparen mengikuti tema halaman.
+    # dragging=False supaya usapan jari di HP menggulir halaman, bukan menggeser peta
     peta = folium.Map(
+        location=[(batas_peta[0][0] + batas_peta[1][0]) / 2, (batas_peta[0][1] + batas_peta[1][1]) / 2], zoom_start=9,
         tiles=None, attribution_control=False, zoom_control=False,
-        min_zoom=8, max_zoom=14, zoom_snap=0.1,
+        min_zoom=8, max_zoom=14, zoom_snap=0.1, dragging=False,
     )
     peta.get_root().header.add_child(folium.Element(
         "<style>html, body, .folium-map, .leaflet-container { background: transparent !important; }</style>"
@@ -398,20 +633,17 @@ def tampilkan_peta_sektor(hasil_sektor):
             ),
         ).add_to(peta)
 
-    peta.fit_bounds(batas_peta, padding=(14, 14))
+    buat_penyesuai_peta(batas_peta).add_to(peta)
 
-    # Peta tinggi-ramping (bentuk DKI + Kep. Seribu memanjang ke utara), lebar tetap di kolom tengah
-    _, kolom_peta, _ = st.columns([1, 1.1, 1])
-    with kolom_peta:
-        st_folium(peta, width=360, height=560, returned_objects=[], key="peta_sektor")
+    # Peta tinggi-ramping (bentuk DKI + Kep. Seribu memanjang ke utara), lebar mengikuti kolom
+    st_folium(peta, use_container_width=True, height=500, returned_objects=[], key="peta_sektor")
 
-        legend_html = " &nbsp; ".join(
-            f'<span style="white-space:nowrap;"><span style="display:inline-block;width:11px;height:11px;background:{BADGE_WARNA[w]};border-radius:2px;vertical-align:middle;"></span> {nama}</span>'
-            for w, nama in [('blue', 'Blue Ocean (LQ < 0.8)'), ('yellow', 'Neutral Ocean (0.8–1.25)'),
-                            ('red', 'Red Ocean (LQ > 1.25)'), ('gray', 'Data Terbatas')]
-        )
-        st.markdown(f'<div style="font-size:12px;text-align:center;line-height:1.8;">{legend_html}</div>', unsafe_allow_html=True)
-    st.caption("Peta menampilkan konsentrasi sektor (LQ) per wilayah administrasi, bukan sebaran klaster. Kep. Seribu (pulau-pulau kecil di bagian atas peta) dapat diperbesar dengan scroll.")
+    legend_html = " &nbsp; ".join(
+        f'<span style="white-space:nowrap;"><span style="display:inline-block;width:11px;height:11px;background:{BADGE_WARNA[w]};border-radius:2px;vertical-align:middle;"></span> {nama}</span>'
+        for w, nama in [('blue', 'Blue Ocean'), ('yellow', 'Neutral Ocean'), ('red', 'Red Ocean'), ('gray', 'Data Terbatas')]
+    )
+    st.markdown(f'<div style="font-size:12px;text-align:center;line-height:1.8;">{legend_html}</div>', unsafe_allow_html=True)
+    st.caption("Ketuk atau arahkan kursor ke wilayah untuk melihat rinciannya. Kep. Seribu (pulau-pulau kecil di bagian atas peta) dapat diperbesar dengan scroll atau cubit layar.")
 
 @st.cache_data(show_spinner="Menyiapkan berkas Excel...")
 def buat_excel_segmentasi(df_data, df_ringkasan):
@@ -459,150 +691,146 @@ if df_eval_all is None:
 REFERENSI_LQ = hitung_referensi_lq(df_all)
 
 # ==========================================
-# 4. SIDEBAR: FILTER WILAYAH & PENCARIAN
+# 4. JUDUL APLIKASI & TAB UTAMA
 # ==========================================
-st.sidebar.header("📍 Filter Wilayah")
-
+# Semua pilihan berada di dalam tab masing-masing (bukan sidebar), karena sidebar tersembunyi di layar HP
 daftar_wilayah = sorted(df_all['wilayah'].unique().tolist())
-selected_wilayah = st.sidebar.selectbox("Pilih Kota/Kabupaten Administrasi:", daftar_wilayah)
 
-df_wilayah_raw = df_all[df_all['wilayah'] == selected_wilayah].copy()
-profile_wilayah = df_eval_all[df_eval_all['wilayah'] == selected_wilayah].copy()
-df_wilayah, profiles = generate_cluster_profiles(df_wilayah_raw, profile_wilayah)
-
-elbow_wilayah = df_elbow_all[df_elbow_all['wilayah'] == selected_wilayah].sort_values('k') if df_elbow_all is not None else None
-
-# k wilayah terpilih: dari 02c_k_optimal.csv; kalau berkas belum ada, pakai jumlah klaster di dataset
-k_opt_wilayah = None
-if df_k_opt_all is not None:
-    baris_k = df_k_opt_all[df_k_opt_all['wilayah'] == selected_wilayah]
-    if not baris_k.empty:
-        k_opt_wilayah = baris_k.iloc[0]
-k_wilayah = int(k_opt_wilayah['k_optimal']) if k_opt_wilayah is not None else int(df_wilayah_raw['cluster'].nunique())
-
-st.sidebar.markdown("---")
-st.sidebar.header("🔍 Cari Komoditas Usaha")
-search_query = st.sidebar.text_input("Ketik jenis usaha (misal: Sablon, Ikan, Fesyen):", "")
-
-if search_query:
-    df_search = df_wilayah[
-        df_wilayah['jenis_usaha'].str.contains(search_query, case=False, na=False) |
-        df_wilayah['sektor_makro'].str.contains(search_query, case=False, na=False)
-    ]
-    st.sidebar.info(f"Ditemukan {len(df_search):,} data dengan kata kunci '{search_query}'.")
-
-st.sidebar.markdown("---")
-st.sidebar.caption("💡 *Sistem Segmentasi UMKM DKI Jakarta - Algoritma K-Modes Clustering (2 Fitur: Sektor, Usia Usaha).*")
-
-# ==========================================
-# 5. JUDUL APLIKASI & TAB UTAMA
-# ==========================================
 st.markdown('<div class="main-title">Peta Segmentasi & Peluang Usaha UMKM DKI Jakarta</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Segmentasi Data Terbuka Berbasis K-Modes Clustering (Periode 2024) & Penerapan Red/Blue Ocean Menggunakan Location Quotient</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Lihat sektor usaha yang padat dan yang masih jarang di tiap wilayah. Baru pertama kali? Buka tab ❓ Bantuan.</div>', unsafe_allow_html=True)
 
-tab_wilayah, tab_sektor, tab_k = st.tabs([
-    "📍 Analisis per Wilayah", "📊 Perbandingan Sektor Lintas Wilayah", "📉 Evaluasi Jumlah Klaster (k)"
+tab_wilayah, tab_sektor, tab_bantuan, tab_k = st.tabs([
+    "📍 Wilayah", "📊 Sektor", "❓ Bantuan", "📉 Evaluasi"
 ])
 
+def ambil_k_optimal(wilayah):
+    """Baris 02c_k_optimal.csv untuk 1 wilayah, atau None jika berkas/barisnya belum ada."""
+    if df_k_opt_all is None:
+        return None
+    baris_k = df_k_opt_all[df_k_opt_all['wilayah'] == wilayah]
+    return baris_k.iloc[0] if not baris_k.empty else None
+
 # ==========================================
-# TAB 1: ANALISIS PER WILAYAH (alur yang sudah ada)
+# TAB 1: ANALISIS PER WILAYAH
 # ==========================================
 with tab_wilayah:
+    selected_wilayah = st.selectbox("Pilih wilayah:", daftar_wilayah, format_func=nama_pendek_wilayah, key="wilayah_select")
 
-    st.markdown(f"### {selected_wilayah}")
+    df_wilayah_raw = df_all[df_all['wilayah'] == selected_wilayah].copy()
+    profile_wilayah = df_eval_all[df_eval_all['wilayah'] == selected_wilayah].copy()
+    df_wilayah, profiles = generate_cluster_profiles(df_wilayah_raw, profile_wilayah)
 
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    with kpi1:
-        st.metric("Total UMKM Terdata", f"{len(df_wilayah):,} Unit")
-    with kpi2:
-        st.metric("Ragam Jenis Usaha", f"{df_wilayah['jenis_usaha'].nunique():,} Kategori")
-    with kpi3:
-        st.metric("Sektor Terbesar", df_wilayah['sektor_makro'].mode()[0])
-    with kpi4:
-        st.metric("Jumlah Segmen", f"{k_wilayah} Klaster", help="Jumlah segmen (k) UMKM di wilayah ini, dihitung dengan aturan titik terjauh dari garis lurus pada kurva Elbow k=2..6 (lihat tab Evaluasi Jumlah Klaster dan notebooks/02_kmodes_partitioning.ipynb).")
+    # k wilayah terpilih: dari 02c_k_optimal.csv; kalau berkas belum ada, pakai jumlah klaster di dataset
+    k_opt_wilayah = ambil_k_optimal(selected_wilayah)
+    k_wilayah = int(k_opt_wilayah['k_optimal']) if k_opt_wilayah is not None else int(df_wilayah_raw['cluster'].nunique())
 
-    st.markdown("---")
+    tampilkan_ringkasan([
+        ("Total UMKM", f"{len(df_wilayah):,}"),
+        ("Ragam Jenis Usaha", f"{df_wilayah['jenis_usaha'].nunique():,}"),
+        ("Jumlah Segmen", f"{k_wilayah}"),
+        ("Sektor Terbesar", df_wilayah['sektor_makro'].mode()[0]),
+    ])
 
     # ==========================================
-    # KARTU PROFIL KLASTER MULTIDIMENSI
+    # KARTU PROFIL KLASTER
     # ==========================================
-    st.subheader("💡 Profil Klaster (Sektor × Usia Usaha)")
+    st.subheader("💡 Segmen Usaha di Wilayah Ini")
     profiles_terurut = sorted(profiles.items(), key=lambda item: item[1]['pct'], reverse=True)
-    cols_kartu = st.columns(len(profiles_terurut))
-
-    for idx, (c_name, info) in enumerate(profiles_terurut):
-        badge_color = BADGE_WARNA[info['warna_ocean']]
-        badge_emoji = BADGE_EMOJI[info['warna_ocean']]
-        lq_text = f"{info['lq']:.2f}" if info['lq'] is not None else "N/A"
-        with cols_kartu[idx]:
-            st.markdown(f"""
-                <div style="
-                    background-color: {info['bg']};
-                    border-left: 5px solid {info['border']};
-                    padding: 14px;
-                    border-radius: 8px;
-                    min-height: 260px;
-                ">
-                    <h4 style="margin: 0 0 6px 0; color: #111827; font-size: 14.5px;">{c_name}</h4>
-                    <p style="font-size: 12.5px; margin: 0; color: #374151; line-height: 1.6;">
-                        <b>Populasi:</b> {info['total']:,} UMKM ({info['pct']:.1f}%)<br>
-                        <b>Sektor Dominan:</b> {info['top_sektor']} ({info['top_sektor_pct']:.1f}%)<br>
-                        <b>Usia Usaha Dominan:</b> {info['top_usia']} ({info['top_usia_pct']:.1f}%)<br>
-                    </p>
-                    <div style="margin-top: 10px;">
-                        <span title="{OCEAN_TOOLTIP}" style="background-color: {badge_color}; color: white; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; cursor: help;">
-                            LQ: {lq_text} {badge_emoji} {info['label_ocean']}
-                        </span>
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
+    tampilkan_kartu_segmen(profiles_terurut)
 
     # LQ klaster = LQ sektor dominannya di wilayah ini, jadi sektor dominan sama -> badge Ocean identik
     if len({info['top_sektor'] for info in profiles.values()}) == 1:
-        st.caption("Sektor dominan sama di seluruh klaster, perbandingan Ocean antar-sektor ada di tab Perbandingan Sektor")
+        st.caption("Sektor utama semua segmen sama, jadi labelnya juga sama. Perbandingan antar-sektor ada di tab Sektor.")
+
+    with st.expander("Apa arti Red, Neutral, dan Blue Ocean?"):
+        tampilkan_penjelasan_ocean()
 
     # ==========================================
-    # PETA KLASTER: HEATMAP SEKTOR x USIA USAHA
+    # KOMODITAS & DAFTAR USAHA PER SEGMEN
     # ==========================================
-    st.subheader("🗺️ Peta Klaster: Sektor × Usia Usaha")
-    st.caption("Setiap sel menunjukkan klaster yang mendominasi kombinasi sektor × usia usaha tsb, beserta jumlah dan persentase UMKM dari kombinasi itu yang benar-benar berada di klaster dominan tersebut.")
+    st.subheader("🔎 Lihat Isi Segmen")
+    pilihan_segmen = st.selectbox("Pilih segmen:", [nama for nama, _ in profiles_terurut], key=f"segmen_select_{selected_wilayah}")
+    df_sub = df_wilayah[df_wilayah['nama_segmen'] == pilihan_segmen]
 
-    sektor_order_wilayah = sorted(df_wilayah['sektor_makro'].unique().tolist())
-    pivot_cluster, pivot_n, pivot_pct = build_cluster_heatmap_data(df_wilayah, sektor_order_wilayah)
+    st.markdown("**Jenis usaha terbanyak**")
+    top_jenis = df_sub['jenis_usaha'].value_counts().head(8).reset_index()
+    top_jenis.columns = ['Jenis Usaha', 'Jumlah Unit']
+    top_jenis['Label'] = top_jenis['Jenis Usaha'].map(bungkus_label)
 
-    text_matrix = []
-    for r in range(pivot_cluster.shape[0]):
-        row_text = []
-        for c in range(pivot_cluster.shape[1]):
-            if pd.isna(pivot_cluster.iat[r, c]):
-                row_text.append("Tidak ada data")
-            else:
-                row_text.append(
-                    f"Klaster {int(pivot_cluster.iat[r, c])} • {int(pivot_n.iat[r, c]):,} UMKM ({pivot_pct.iat[r, c]:.0f}%)"
-                )
-        text_matrix.append(row_text)
+    fig_bar = px.bar(
+        top_jenis,
+        x='Jumlah Unit',
+        y='Label',
+        orientation='h',
+        text='Jumlah Unit',
+        color='Jumlah Unit',
+        color_continuous_scale='Blues',
+        hover_name='Jenis Usaha',
+        hover_data={'Label': False, 'Jumlah Unit': True},
+    )
+    fig_bar.update_traces(cliponaxis=False)
+    fig_bar.update_layout(
+        yaxis=dict(autorange="reversed", title=""), xaxis=dict(title="", showticklabels=False),
+        margin=dict(t=10, b=10, l=10, r=40), height=380, coloraxis_showscale=False,
+    )
+    tampilkan_grafik(fig_bar)
 
-    fig_heatmap = go.Figure(go.Heatmap(
-        z=pivot_cluster.values, x=[u.split(' (')[0] for u in USIA_ORDER], y=sektor_order_wilayah,
-        colorscale=discrete_colorscale(CLUSTER_COLORS[:k_wilayah]), zmin=-0.5, zmax=k_wilayah - 0.5,
-        text=text_matrix, texttemplate="%{text}", textfont={"size": 11},
-        hovertemplate="Sektor: %{y}<br>Usia Usaha: %{x}<br>%{text}<extra></extra>",
-        xgap=4, ygap=4,
-        colorbar=dict(title="Klaster", tickmode="array", tickvals=list(range(k_wilayah)), ticktext=[f"Klaster {i}" for i in range(k_wilayah)]),
-    ))
-    fig_heatmap.update_layout(margin=dict(t=20, b=10, l=10, r=10), height=380)
-    st.plotly_chart(fig_heatmap, width='stretch')
+    with st.expander("📋 Daftar lengkap jenis usaha di segmen ini"):
+        rekap_usaha = df_sub.groupby(['jenis_usaha', 'sektor_makro']).agg(
+            Jumlah_Usaha=('jenis_usaha', 'count'),
+            Usia_Usaha_Utama=('kelompok_tahun_berdiri', lambda x: x.mode()[0] if not x.empty else '-')
+        ).reset_index().sort_values(by='Jumlah_Usaha', ascending=False)
+
+        rekap_usaha['Porsi di Segmen (%)'] = (
+            (rekap_usaha['Jumlah_Usaha'] / len(df_sub)) * 100
+        ).round(2)
+
+        st.dataframe(
+            rekap_usaha,
+            column_order=["jenis_usaha", "Jumlah_Usaha", "Porsi di Segmen (%)", "Usia_Usaha_Utama", "sektor_makro"],
+            column_config={
+                "jenis_usaha": st.column_config.TextColumn("Jenis Usaha", width="medium"),
+                "sektor_makro": st.column_config.TextColumn("Sektor Makro", width="medium"),
+                "Jumlah_Usaha": st.column_config.NumberColumn("Jumlah Unit", format="%d unit"),
+                "Porsi di Segmen (%)": st.column_config.NumberColumn("Porsi di Segmen", format="%.2f %%"),
+                "Usia_Usaha_Utama": "Usia Usaha"
+            },
+            width='stretch',
+            height=320,
+            hide_index=True
+        )
 
     # ==========================================
-    # VISUALISASI KOMPOSISI & KOMODITAS
+    # PENCARIAN JENIS USAHA
     # ==========================================
-    col_viz1, col_viz2 = st.columns([1, 1.3])
+    kolom_tampil = ['jenis_usaha', 'sektor_makro', 'kelompok_tahun_berdiri', 'nama_segmen']
 
-    with col_viz1:
-        st.subheader("Komposisi Segmen UMKM")
+    with st.expander("🔍 Cari jenis usaha di wilayah ini"):
+        search_query = st.text_input("Ketik jenis usaha (misal: Sablon, Ikan, Fesyen):", "", key=f"cari_{selected_wilayah}")
+        if search_query:
+            df_search = df_wilayah[
+                df_wilayah['jenis_usaha'].str.contains(search_query, case=False, na=False, regex=False) |
+                df_wilayah['sektor_makro'].str.contains(search_query, case=False, na=False, regex=False)
+            ]
+            st.caption(f"Ditemukan {len(df_search):,} data dengan kata kunci '{search_query}'.")
+            st.dataframe(
+                df_search[kolom_tampil],
+                column_config={
+                    "jenis_usaha": "Jenis Usaha", "sektor_makro": "Sektor Makro",
+                    "kelompok_tahun_berdiri": "Usia Usaha", "nama_segmen": "Segmen",
+                },
+                width='stretch',
+                height=320,
+                hide_index=True,
+            )
+
+    # ==========================================
+    # VISUALISASI KOMPOSISI & PETA KLASTER
+    # ==========================================
+    with st.expander("🍩 Komposisi segmen"):
         cluster_counts = df_wilayah['nama_segmen'].value_counts().reset_index()
         cluster_counts.columns = ['Segmen', 'Jumlah UMKM']
-        # Urut menurut id klaster supaya urutan legend sama dengan kartu profil & heatmap
+        # Urut menurut id klaster supaya urutan legend sama dengan warna kartu profil & heatmap
         cluster_counts['id'] = cluster_counts['Segmen'].map({nama: info['id'] for nama, info in profiles.items()})
         cluster_counts = cluster_counts.sort_values('id')
 
@@ -615,8 +843,7 @@ with tab_wilayah:
             color_discrete_map={nama: info['border'] for nama, info in profiles.items()},
             category_orders={'Segmen': cluster_counts['Segmen'].tolist()},
         )
-        # Persentase di dalam irisan, legend di bawah donut (nama segmen panjang tidak memakan lebar donut);
-        # tinggi 430 px menyamai kolom kanan (selectbox + grafik batang 340 px)
+        # Persentase di dalam irisan, legend di bawah donut (nama segmen panjang tidak memakan lebar donut)
         fig_pie.update_traces(
             sort=False, texttemplate='%{percent:.1%}', textposition='inside', insidetextorientation='horizontal',
             textfont=dict(size=13, color='white'),
@@ -627,69 +854,36 @@ with tab_wilayah:
             legend=dict(orientation='h', yanchor='top', y=-0.02, xanchor='center', x=0.5, font=dict(size=11)),
             uniformtext=dict(minsize=10, mode='hide'),
         )
-        st.plotly_chart(fig_pie, width='stretch')
+        tampilkan_grafik(fig_pie)
 
-    with col_viz2:
-        st.subheader("Komoditas Terbanyak per Segmen")
-        pilihan_segmen_chart = st.selectbox("Pilih Segmen untuk Ditinjau:", list(profiles.keys()), key=f"segmen_select_{selected_wilayah}")
+    with st.expander("🗺️ Peta klaster: sektor × usia usaha"):
+        st.caption("Tiap sel menunjukkan klaster yang paling banyak pada kombinasi sektor dan usia usaha tersebut, beserta jumlah UMKM dan persentase yang masuk klaster itu.")
 
-        df_sub = df_wilayah[df_wilayah['nama_segmen'] == pilihan_segmen_chart]
-        top_jenis = df_sub['jenis_usaha'].value_counts().head(8).reset_index()
-        top_jenis.columns = ['Jenis Usaha', 'Jumlah Unit']
+        sektor_order_wilayah = sorted(df_wilayah['sektor_makro'].unique().tolist())
+        pivot_cluster, pivot_n, pivot_pct = build_cluster_heatmap_data(df_wilayah, sektor_order_wilayah)
 
-        fig_bar = px.bar(
-            top_jenis,
-            x='Jumlah Unit',
-            y='Jenis Usaha',
-            orientation='h',
-            text='Jumlah Unit',
-            color='Jumlah Unit',
-            color_continuous_scale='Blues'
-        )
-        fig_bar.update_layout(yaxis=dict(autorange="reversed"), margin=dict(t=20, b=10, l=10, r=10), height=340, coloraxis_showscale=False)
-        st.plotly_chart(fig_bar, width='stretch')
+        text_matrix = []
+        for r in range(pivot_cluster.shape[0]):
+            row_text = []
+            for c in range(pivot_cluster.shape[1]):
+                if pd.isna(pivot_cluster.iat[r, c]):
+                    row_text.append("Tidak ada data")
+                else:
+                    row_text.append(
+                        f"Klaster {int(pivot_cluster.iat[r, c])}<br>{int(pivot_n.iat[r, c]):,} ({pivot_pct.iat[r, c]:.0f}%)"
+                    )
+            text_matrix.append(row_text)
 
-    # ==========================================
-    # TABEL EKSPLORASI DAFTAR USAHA
-    # ==========================================
-    st.markdown("---")
-    st.subheader("📋 Eksplorasi Daftar Usaha Tersegmentasi")
-
-    kolom_tampil = ['jenis_usaha', 'sektor_makro', 'kelompok_tahun_berdiri', 'nama_segmen']
-
-    if search_query:
-        st.markdown(f"**Hasil Pencarian untuk:** `{search_query}`")
-        st.dataframe(df_search[kolom_tampil + ['wilayah']], width='stretch')
-    else:
-        list_names = list(profiles.keys())
-        tabs = st.tabs([f"📂 {name}" for name in list_names])
-
-        for idx_tab, tab_obj in enumerate(tabs):
-            target_name = list_names[idx_tab]
-            with tab_obj:
-                df_tab_data = df_wilayah[df_wilayah['nama_segmen'] == target_name]
-
-                rekap_usaha = df_tab_data.groupby(['jenis_usaha', 'sektor_makro']).agg(
-                    Jumlah_Usaha=('jenis_usaha', 'count'),
-                    Usia_Usaha_Utama=('kelompok_tahun_berdiri', lambda x: x.mode()[0] if not x.empty else '-')
-                ).reset_index().sort_values(by='Jumlah_Usaha', ascending=False)
-
-                rekap_usaha['Porsi di Segmen (%)'] = (
-                    (rekap_usaha['Jumlah_Usaha'] / len(df_tab_data)) * 100
-                ).round(2)
-
-                st.dataframe(
-                    rekap_usaha,
-                    column_config={
-                        "jenis_usaha": st.column_config.TextColumn("Jenis Usaha", width="large"),
-                        "sektor_makro": st.column_config.TextColumn("Sektor Makro", width="medium"),
-                        "Jumlah_Usaha": st.column_config.NumberColumn("Jumlah Unit", format="%d unit"),
-                        "Porsi di Segmen (%)": st.column_config.NumberColumn("Porsi di Segmen", format="%.2f %%"),
-                        "Usia_Usaha_Utama": "Usia Usaha"
-                    },
-                    width='stretch',
-                    hide_index=True
-                )
+        # Nomor klaster sudah tertulis di tiap sel, jadi colorbar tidak ditampilkan supaya sel lebih lebar
+        fig_heatmap = go.Figure(go.Heatmap(
+            z=pivot_cluster.values, x=[u.replace(' (', '<br>(') for u in USIA_ORDER], y=[bungkus_label(s, 16) for s in sektor_order_wilayah],
+            colorscale=discrete_colorscale(CLUSTER_COLORS[:k_wilayah]), zmin=-0.5, zmax=k_wilayah - 0.5,
+            text=text_matrix, texttemplate="%{text}", textfont={"size": 10},
+            hoverinfo="skip",
+            xgap=4, ygap=4, showscale=False,
+        ))
+        fig_heatmap.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=420)
+        tampilkan_grafik(fig_heatmap)
 
     # ==========================================
     # UNDUH DATA
@@ -711,27 +905,29 @@ with tab_wilayah:
     xlsx_export = buat_excel_segmentasi(data_export, ringkasan_export)
     nama_file = selected_wilayah.lower().replace('.', '').replace(' ', '_')
     st.download_button(
-        label=f"📥 Unduh Data Segmentasi {selected_wilayah} (Excel)",
+        label=f"📥 Unduh Data {nama_pendek_wilayah(selected_wilayah)} (Excel)",
         data=xlsx_export,
         file_name=f"segmentasi_{nama_file}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        width='stretch',
     )
 
 # ==========================================
 # TAB 2: PERBANDINGAN SEKTOR LINTAS WILAYAH
 # ==========================================
 with tab_sektor:
-    st.subheader("📊 Perbandingan 1 Sektor Lintas 6 Wilayah")
-    st.caption("Mode analisis lain: pilih 1 sektor usaha, lihat klasifikasi Red/Neutral/Blue Ocean-nya di seluruh 6 wilayah DKI Jakarta -- independen dari filter wilayah di sidebar.")
+    st.subheader("📊 Bandingkan 1 Sektor di 6 Wilayah")
 
     daftar_sektor = sorted(df_all['sektor_makro'].unique().tolist())
-    sektor_terpilih = st.selectbox("Pilih Sektor Makro:", daftar_sektor, key="sektor_lintas_wilayah_select")
+    sektor_terpilih = st.selectbox("Pilih sektor:", daftar_sektor, key="sektor_lintas_wilayah_select")
 
     hasil_sektor = bandingkan_sektor_lintas_wilayah(df_all, sektor_terpilih, REFERENSI_LQ)
 
     if hasil_sektor.empty:
         st.warning(f"Tidak ada data untuk sektor '{sektor_terpilih}' di wilayah manapun.")
     else:
+        hasil_sektor['nama_pendek'] = hasil_sektor['wilayah'].map(nama_pendek_wilayah)
+
         lq_valid = hasil_sektor[hasil_sektor['lq'].notna()]
         if lq_valid.empty:
             st.info(f"Location Quotient (LQ) sektor **{sektor_terpilih}** tidak dapat dihitung untuk wilayah mana pun.")
@@ -739,68 +935,96 @@ with tab_sektor:
             tertinggi = lq_valid.loc[lq_valid['lq'].idxmax()]
             terendah = lq_valid.loc[lq_valid['lq'].idxmin()]
             st.info(
-                f"Sektor **{sektor_terpilih}** paling terkonsentrasi di **{tertinggi['wilayah']}** "
-                f"(LQ {tertinggi['lq']:.2f}, {tertinggi['label']}) dan paling longgar di **{terendah['wilayah']}** "
+                f"**{sektor_terpilih}** paling padat di **{tertinggi['nama_pendek']}** "
+                f"(LQ {tertinggi['lq']:.2f}, {tertinggi['label']}) dan paling jarang di **{terendah['nama_pendek']}** "
                 f"(LQ {terendah['lq']:.2f}, {terendah['label']})."
             )
 
-        tampilkan_peta_sektor(hasil_sektor)
+        with st.expander("Apa arti Red, Neutral, dan Blue Ocean?"):
+            tampilkan_penjelasan_ocean()
 
-        tabel_sektor = hasil_sektor[[
-            'wilayah', 'n_usaha', 'lq', 'label'
-        ]].copy()
-        tabel_sektor.columns = [
-            'Wilayah', 'Jumlah Usaha', 'Location Quotient (LQ)', 'Label'
-        ]
-        st.dataframe(
-            tabel_sektor,
-            column_config={
-                "Wilayah": st.column_config.TextColumn("Wilayah", width="medium"),
-                "Location Quotient (LQ)": st.column_config.NumberColumn("Location Quotient (LQ)", format="%.2f", help=LQ_TOOLTIP),
-            },
-            width='stretch',
-            hide_index=True,
-        )
+        # Berdampingan di layar lebar, otomatis tersusun ke bawah di HP
+        kolom_peta, kolom_grafik = st.columns([1, 1.3])
 
-        fig_sektor = px.bar(
-            hasil_sektor,
-            x='lq', y='wilayah', orientation='h',
-            text='lq', color='warna',
-            color_discrete_map=BADGE_WARNA,
-        )
-        fig_sektor.update_traces(texttemplate='%{text:.2f}', textposition='outside')
-        fig_sektor.add_vline(x=1.0, line_dash="dash", line_color="#6B7280", annotation_text="Rata-rata DKI (LQ=1.0)")
-        fig_sektor.update_layout(
-            xaxis_title="Location Quotient (LQ)", yaxis_title="",
-            showlegend=False, margin=dict(t=20, b=10, l=10, r=30), height=340,
-            xaxis_range=[0, max(1.5, hasil_sektor['lq'].max(skipna=True) * 1.15 if hasil_sektor['lq'].notna().any() else 1.5)]
-        )
-        st.plotly_chart(fig_sektor, width='stretch')
+        with kolom_peta:
+            tampilkan_peta_sektor(hasil_sektor)
 
-        with st.expander("Apa arti kepadatan Red, Neutral, dan Blue Ocean?", expanded=False):
-            st.markdown(
-                f"""
-Label ini menggambarkan **tingkat kepadatan** sektor usaha di suatu wilayah dibandingkan dengan rata-rata seluruh DKI Jakarta, diukur lewat Location Quotient (LQ).
+        with kolom_grafik:
+            fig_sektor = px.bar(
+                hasil_sektor,
+                x='lq', y='nama_pendek', orientation='h',
+                text='lq', color='warna',
+                color_discrete_map=BADGE_WARNA,
+            )
+            fig_sektor.update_traces(texttemplate='%{text:.2f}', textposition='outside', cliponaxis=False)
+            fig_sektor.add_vline(x=1.0, line_dash="dash", line_color="#6B7280", layer="below",
+                              annotation_text="Rata-rata Jakarta (LQ 1.0)", annotation_position="top", annotation_yanchor="bottom")
+            # categoryarray: urutan LQ dipertahankan walau tiap warna menjadi trace terpisah
+            fig_sektor.update_layout(
+                xaxis_title="Location Quotient (LQ)", yaxis_title="",
+                yaxis=dict(categoryorder='array', categoryarray=hasil_sektor['nama_pendek'].tolist()),
+                showlegend=False, margin=dict(t=40, b=10, l=10, r=30), height=380,
+                xaxis_range=[0, max(1.5, hasil_sektor['lq'].max(skipna=True) * 1.15 if hasil_sektor['lq'].notna().any() else 1.5)]
+            )
+            tampilkan_grafik(fig_sektor)
 
-- 🔴 **Red Ocean (LQ > {LQ_BATAS_RED})**: sektor ini **lebih padat** dari rata-rata DKI Jakarta. Pelaku usaha di wilayah ini banyak, sehingga persaingan cenderung ketat.
-- 🟡 **Neutral Ocean (LQ {LQ_BATAS_BLUE}–{LQ_BATAS_RED})**: kepadatan sektor ini **sebanding** dengan rata-rata DKI Jakarta. Persaingan tidak menonjol, baik tinggi maupun rendah.
-- 🔵 **Blue Ocean (LQ < {LQ_BATAS_BLUE})**: sektor ini **lebih jarang** dari rata-rata DKI Jakarta. Pelaku usaha di wilayah ini sedikit, sehingga persaingan cenderung longgar dan ruang tumbuh lebih terbuka.
-- ⚪ **Data Terbatas**: jumlah usaha terlalu sedikit untuk dilabeli secara andal.
-
-LQ = (porsi sektor di wilayah) ÷ (porsi sektor di seluruh DKI Jakarta). LQ = 1 berarti kepadatannya persis sama dengan rata-rata DKI Jakarta.
-"""
+        with st.expander("📋 Lihat dalam bentuk tabel"):
+            tabel_sektor = hasil_sektor[[
+                'nama_pendek', 'n_usaha', 'lq', 'label'
+            ]].copy()
+            tabel_sektor.columns = [
+                'Wilayah', 'Jumlah Usaha', 'Location Quotient (LQ)', 'Label'
+            ]
+            st.dataframe(
+                tabel_sektor,
+                column_config={
+                    "Wilayah": st.column_config.TextColumn("Wilayah", width="medium"),
+                    "Location Quotient (LQ)": st.column_config.NumberColumn("LQ", format="%.2f", help=LQ_TOOLTIP),
+                },
+                width='stretch',
+                hide_index=True,
             )
 
 # ==========================================
-# TAB 3: EVALUASI JUMLAH KLASTER (k)
+# TAB 3: BANTUAN & FAQ
+# ==========================================
+with tab_bantuan:
+    st.subheader("🧭 Cara Memakai Dashboard")
+    st.markdown(
+        """
+1. **Tab Wilayah:** pilih wilayah untuk melihat ringkasan UMKM dan segmen usahanya.
+2. **Tab Sektor:** pilih satu sektor untuk membandingkan kepadatannya di 6 wilayah.
+3. **Tab Evaluasi:** lihat dasar penentuan jumlah segmen. Tab ini lebih teknis dan boleh dilewati.
+"""
+    )
+
+    st.subheader("🌊 Arti Red, Neutral, dan Blue Ocean")
+    st.markdown("Label ini menunjukkan seberapa padat suatu sektor usaha di sebuah wilayah **dibandingkan rata-rata seluruh DKI Jakarta**.")
+    tampilkan_penjelasan_ocean()
+
+    st.subheader("🙋 Pertanyaan yang Sering Diajukan")
+    for pertanyaan, jawaban in FAQ:
+        with st.expander(pertanyaan):
+            st.markdown(jawaban)
+
+    with st.expander("Dari mana datanya?"):
+        st.markdown(
+            f"Dari data terbuka UMKM DKI Jakarta periode 2024, sebanyak {len(df_all):,} baris setelah dibersihkan. "
+            "Hasilnya hanya menggambarkan usaha yang tercatat di data tersebut."
+        )
+
+# ==========================================
+# TAB 4: EVALUASI JUMLAH KLASTER (k)
 # ==========================================
 with tab_k:
-    st.subheader("📉 Evaluasi Jumlah Klaster (k) per Wilayah")
+    st.subheader("📉 Evaluasi Jumlah Klaster (k)")
+    st.caption("Bagian teknis: dasar penentuan jumlah segmen di tiap wilayah menggunakan kurva Elbow.")
 
     if df_k_opt_all is None:
         st.info("Berkas `02c_k_optimal.csv` belum tersedia. Jalankan `notebooks/02_kmodes_partitioning.ipynb` terlebih dahulu.")
     else:
         tabel_k = df_k_opt_all[['wilayah', 'k_optimal', 'kekuatan_siku', 'catatan']].copy()
+        tabel_k['wilayah'] = tabel_k['wilayah'].map(nama_pendek_wilayah)
         tabel_k.columns = ['Wilayah', 'k Optimal', 'Kekuatan Siku', 'Catatan']
         st.dataframe(
             tabel_k,
@@ -816,7 +1040,11 @@ with tab_k:
             hide_index=True,
         )
 
-    st.markdown(f"**Kurva Elbow — {selected_wilayah}**")
+    wilayah_elbow = st.selectbox("Pilih wilayah untuk kurva Elbow:", daftar_wilayah, format_func=nama_pendek_wilayah, key="wilayah_elbow_select")
+    elbow_wilayah = df_elbow_all[df_elbow_all['wilayah'] == wilayah_elbow].sort_values('k') if df_elbow_all is not None else None
+    k_opt_elbow = ambil_k_optimal(wilayah_elbow)
+    k_elbow = int(k_opt_elbow['k_optimal']) if k_opt_elbow is not None else int(df_all[df_all['wilayah'] == wilayah_elbow]['cluster'].nunique())
+
     if elbow_wilayah is not None and not elbow_wilayah.empty:
         fig_elbow = go.Figure()
         fig_elbow.add_trace(go.Scatter(
@@ -828,25 +1056,18 @@ with tab_k:
             x=elbow_wilayah['k'].iloc[[0, -1]], y=elbow_wilayah['cost'].iloc[[0, -1]], name='Garis acuan',
             mode='lines', line=dict(color='#9CA3AF', width=1.5, dash='dot')
         ))
-        teks_k = f"k optimal = {k_wilayah}"
-        if k_opt_wilayah is not None:
-            teks_k += f" (d = {k_opt_wilayah['kekuatan_siku']:.3f})"
-        fig_elbow.add_vline(x=k_wilayah, line_dash="dash", line_color="#EF4444", annotation_text=teks_k)
+        teks_k = f"k optimal = {k_elbow}"
+        if k_opt_elbow is not None:
+            teks_k += f" (d = {k_opt_elbow['kekuatan_siku']:.3f})"
+        fig_elbow.add_vline(x=k_elbow, line_dash="dash", line_color="#EF4444", annotation_text=teks_k)
         fig_elbow.update_layout(
             xaxis_title="Jumlah Klaster (k)", yaxis_title="Nilai Cost", showlegend=False,
             xaxis=dict(tickmode='array', tickvals=elbow_wilayah['k'].tolist()),
             margin=dict(t=30, b=10, l=10, r=10), height=340
         )
-        st.plotly_chart(fig_elbow, width='stretch')
+        tampilkan_grafik(fig_elbow)
     else:
         st.info("Data kurva biaya untuk wilayah ini belum tersedia.")
 
-    if df_k_opt_all is not None:
-        siku_lemah = df_k_opt_all[df_k_opt_all['wilayah'].isin(['KOTA ADM. JAKARTA BARAT', 'KOTA ADM. JAKARTA UTARA'])]
-        rincian = "; ".join(
-            f"{r.wilayah}: d = {r.kekuatan_siku:.3f} pada k={r.k_optimal}, hanya berselisih {r.selisih_d:.4f} dari k={r.k_pembanding}"
-            for r in siku_lemah.itertuples()
-        )
-
 st.markdown("---")
-st.caption("Aplikasi Analitik Segmentasi UMKM DKI Jakarta | K-Modes Clustering (Sektor Makro × Usia Usaha) | Penentuan k: Kurva Elbow (Titik Terjauh dari Garis Lurus)")
+st.caption("Aplikasi Analitik Segmentasi UMKM DKI Jakarta | K-Modes Clustering (Sektor Makro × Usia Usaha) | Penentuan k: Kurva Elbow (Titik Terjauh dari Garis Lurus) | Red/Blue Ocean: Location Quotient")
